@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム</title>
+    <title>道案内システム (入力機能拡張版)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -13,11 +13,25 @@
 
     <style>
         html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; }
-        #map { width: 100%; height: calc(100% - 100px); }
-        #control-panel { height: 100px; background: #f8f9fa; padding: 10px; box-sizing: border-box; text-align: center; }
-        .btn { padding: 12px 24px; font-size: 16px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
-        .btn:disabled { background: #ccc; }
-        #status { margin-top: 5px; font-size: 14px; color: #555; }
+        #map { width: 100%; height: calc(100% - 160px); }
+        
+        /* 操作パネルのスタイル調整 */
+        #control-panel { 
+            height: 160px; 
+            background: #f8f9fa; 
+            padding: 15px; 
+            box-sizing: border-box; 
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            box-shadow: 0 -2px 5px rgba(0,0,0,0.1);
+        }
+        .input-row { display: flex; align-items: center; gap: 10px; }
+        .input-row label { width: 70px; font-weight: bold; font-size: 14px; }
+        .input-box { flex: 1; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+        .btn { padding: 8px 16px; font-size: 14px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+        .btn-secondary { background: #6c757d; }
+        #status { font-size: 13px; color: #666; margin-top: 2px; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -25,8 +39,20 @@
     <div id="map"></div>
 
     <div id="control-panel">
-        <button id="voice-btn" class="btn">🎤 音声で目的地を設定</button>
-        <div id="status">ボタンを押して、目的地（例：「東京駅」など）を話してください</div>
+        <div class="input-row">
+            <label>現在地:</label>
+            <button id="gps-btn" class="btn btn-secondary">🛰️ GPSで取得</button>
+            <input type="text" id="start-input" class="input-box" placeholder="または場所を入力（例：新宿駅）">
+            <button id="set-start-btn" class="btn">設定</button>
+        </div>
+
+        <div class="input-row">
+            <label>目的地:</label>
+            <input type="text" id="end-input" class="input-box" placeholder="目的地を入力（例：東京駅）">
+            <button id="set-end-btn" class="btn">ルート検索</button>
+        </div>
+
+        <div id="status">現在地と目的地を入力してください。</div>
     </div>
 
     <script>
@@ -36,64 +62,113 @@
             attribution: '&copy; OpenStreetMap contributors'
         }).addTo(map);
 
-        let currentMarker = null;
+        let startMarker = null;
+        let endMarker = null;
         let routeControl = null;
-        let userLocation = null;
-        let destinationLatLng = null;
-        let lastInstruction = ""; // 同じ音声案内を何度も繰り返さないための防護策
+        
+        let userLocation = null;        // 現在地の緯度経度
+        let destinationLatLng = null;   // 目的地の緯度経度
+        let watchId = null;             // GPS監視用のID
+        let lastInstruction = "";       // 音声案内の重複防止用
 
-        // --- GPS位置情報の取得 ---
-        if (navigator.geolocation) {
-            // watchPositionで移動に合わせてリアルタイムに位置を更新
-            navigator.geolocation.watchPosition(function(position) {
+        // --- パターンA: GPSで現在地を取得する処理 ---
+        document.getElementById('gps-btn').addEventListener('click', () => {
+            // すでに文字入力されている場合はクリアする
+            document.getElementById('start-input').value = "";
+            
+            if (!navigator.geolocation) {
+                updateStatus("⚠️ お使いのブラウザはGPSに対応していません。");
+                return;
+            }
+
+            updateStatus("GPS位置情報を取得中...");
+            
+            // 既存のGPS監視があれば一度止める
+            if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+
+            watchId = navigator.geolocation.watchPosition(function(position) {
                 userLocation = L.latLng(position.coords.latitude, position.coords.longitude);
                 
-                if (!currentMarker) {
-                    currentMarker = L.marker(userLocation).addTo(map).bindPopup("現在地").openPopup();
-                    map.setView(userLocation, 16);
+                // 現在地マーカーの描画・更新
+                if (!startMarker) {
+                    startMarker = L.marker(userLocation).addTo(map).bindPopup("現在地 (GPS)").openPopup();
                 } else {
-                    currentMarker.setLatLng(userLocation); // 位置の更新
+                    startMarker.setLatLng(userLocation).setPopupContent("現在地 (GPS)");
                 }
+                map.setView(userLocation, 16);
+                updateStatus("GPSで現在地を特定しました。");
 
-                // 目的地がすでに設定されている場合、ルートの自動再検索（リルート）をかける
+                // すでに目的地があれば自動でルート再計算（リルート対応）
                 if (destinationLatLng) {
                     calculateRoute(userLocation, destinationLatLng);
                 }
             }, function() {
-                updateStatus("⚠️ GPSの取得に失敗しました。位置情報を許可してください。");
+                updateStatus("⚠️ GPSの取得に失敗しました。位置情報を許可するか、文字入力をお試しください。");
             }, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 });
-        }
+        });
 
-        // --- 音声認識（目的地の設定） ---
-        const voiceBtn = document.getElementById('voice-btn');
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        // --- パターンB: 現在地を文字入力で指定する処理 ---
+        document.getElementById('set-start-btn').addEventListener('click', () => {
+            const query = document.getElementById('start-input').value.trim();
+            if (!query) {
+                updateStatus("⚠️ 現在地の場所を入力してください。");
+                return;
+            }
+            
+            // 文字入力に切り替えるため、GPSの自動監視はストップする
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
 
-        if (SpeechRecognition) {
-            const recognition = new SpeechRecognition();
-            recognition.lang = 'ja-JP';
+            updateStatus(`現在地「${query}」を検索中...`);
+            searchLocation(query, (latLng) => {
+                userLocation = latLng;
+                if (!startMarker) {
+                    startMarker = L.marker(userLocation).addTo(map).bindPopup(`現在地: ${query}`).openPopup();
+                } else {
+                    startMarker.setLatLng(userLocation).setPopupContent(`現在地: ${query}`).openPopup();
+                }
+                map.setView(userLocation, 15);
+                updateStatus(`現在地を設定しました: ${query}`);
 
-            voiceBtn.addEventListener('click', () => {
-                recognition.start();
-                updateStatus("音声認識中... 話してください...");
+                // すでに目的地があればルート計算
+                if (destinationLatLng) {
+                    calculateRoute(userLocation, destinationLatLng);
+                }
             });
+        });
 
-            recognition.onresult = function(event) {
-                const speechResult = event.results[0][0].transcript;
-                updateStatus(`認識結果: 「${speechResult}」を探しています...`);
-                searchLocation(speechResult); // 音声を文字に変換して検索へ
-            };
+        // --- 目的地の文字入力設定 ＆ ルート検索 ---
+        document.getElementById('set-end-btn').addEventListener('click', () => {
+            const query = document.getElementById('end-input').value.trim();
+            if (!query) {
+                updateStatus("⚠️ 目的地を入力してください。");
+                return;
+            }
 
-            recognition.onerror = function() {
-                updateStatus("⚠️ 音声が聞き取れませんでした。もう一度お試しください。");
-            };
-        } else {
-            voiceBtn.disabled = true;
-            updateStatus("⚠️ お使いのブラウザは音声認識に対応していません。");
-        }
+            updateStatus(`目的地「${query}」を検索中...`);
+            searchLocation(query, (latLng) => {
+                destinationLatLng = latLng;
+                if (!endMarker) {
+                    endMarker = L.marker(destinationLatLng).addTo(map).bindPopup(`目的地: ${query}`).openPopup();
+                } else {
+                    endMarker.setLatLng(destinationLatLng).setPopupContent(`目的地: ${query}`).openPopup();
+                }
+                updateStatus(`目的地を設定しました: ${query}`);
+                speak(`目的地を${query}に設定しました。`);
 
-        // --- 地名検索（文字変換した目的地から緯度経度を取得） ---
-        function searchLocation(query) {
-            // 無料のNominatim API（OpenStreetMapの検索サービス）を利用
+                // 現在地がすでに設定されていればルートを計算
+                if (userLocation) {
+                    calculateRoute(userLocation, destinationLatLng);
+                } else {
+                    updateStatus("目的地を設定しました。次に現在地（GPSまたは文字）を設定してください。");
+                }
+            });
+        });
+
+        // --- 共通機能：地名検索（ジオコーディング） ---
+        function searchLocation(query, callback) {
             const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
             
             fetch(url)
@@ -102,26 +177,16 @@
                 if (data && data.length > 0) {
                     const lat = parseFloat(data[0].lat);
                     const lon = parseFloat(data[0].lon);
-                    destinationLatLng = L.latLng(lat, lon);
-
-                    updateStatus(`目的地を設定しました: ${query}`);
-                    speak(`目的地を${query}に設定しました。ルートを案内します。`);
-
-                    if (userLocation) {
-                        calculateRoute(userLocation, destinationLatLng);
-                    } else {
-                        updateStatus("⚠️ 現在地を取得中です。しばらくお待ちください。");
-                    }
+                    callback(L.latLng(lat, lon));
                 } else {
-                    updateStatus("⚠️ 目的地が見つかりませんでした。別の名前を試してください。");
+                    updateStatus(`⚠️ 「${query}」が見つかりませんでした。別の名称を試してください。`);
                 }
             })
             .catch(() => updateStatus("⚠️ 通信エラーが発生しました。"));
         }
 
-        // --- ルート検索 ＆ 音声道案内 ---
+        // --- 共通機能：ルート検索 ＆ 音声道案内 ---
         function calculateRoute(start, end) {
-            // 既存のルートがあれば一度削除
             if (routeControl) {
                 map.removeControl(routeControl);
             }
@@ -129,36 +194,33 @@
             routeControl = L.Routing.control({
                 waypoints: [start, end],
                 routeWhileDragging: false,
-                addWaypoints: false, // ユーザーによる経由地追加を禁止
+                addWaypoints: false,
                 language: 'ja',
-                show: false // テキストのナビゲーションパネルを非表示（音声メインのため）
+                show: false // ナビパネルは非表示（音声と画面下のステータスで伝えるため）
             }).addTo(map);
 
-            // ルートが計算し終わった時の処理（道案内）
             routeControl.on('routesfound', function(e) {
                 const routes = e.routes;
                 const summary = routes[0].summary;
                 
-                // 次に進むべき指示（例：「〇〇を右折」など）を取得
                 if (routes[0].instructions && routes[0].instructions.length > 0) {
-                    const nextStep = routes[0].instructions[0]; // 直近のナビ指示
+                    const nextStep = routes[0].instructions[0];
                     const instructionText = nextStep.text;
 
-                    // 前回の案内と異なる新しい指示の場合のみ音声で喋る（何度も同じことを言わないように）
+                    // 新しい案内があれば音声で発話
                     if (instructionText !== lastInstruction) {
                         speak(instructionText);
                         lastInstruction = instructionText;
                     }
                     
-                    updateStatus(`残り距離: 約${(summary.totalDistance / 1000).toFixed(1)}km (案内: ${instructionText})`);
+                    updateStatus(`ルート確定：残り約${(summary.totalDistance / 1000).toFixed(1)}km ／ 次の案内: ${instructionText}`);
                 }
             });
         }
 
-        // --- 音声合成（スマホに喋らせる） ---
+        // --- 共通機能：音声合成（喋る機能は維持） ---
         function speak(text) {
             if ('speechSynthesis' in window) {
-                // 再生中の音声を一度停止
                 window.speechSynthesis.cancel();
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = 'ja-JP';
