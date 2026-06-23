@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v1.3.0)</title>
+    <title>道案内システム (v1.4.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v1.3.0) */
+        /* 左上のバージョン表示バッジ (v1.4.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v1.3.0</div>
+        <div id="version-badge">v1.4.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -199,12 +199,56 @@
             });
         }
 
-        // ★修正点：指示データテキストと modifier を組み合わせて「進行方向に対する左右」を厳密に抽出
+        // ★v1.4.0の目玉：2つの進行ベクトルから「幾何学的に正しい左右」を数学的に計算するロジック
+        function calculateTurnDirection(currentIndex, nextInstructionIndex) {
+            if (currentIndex < 2 || currentIndex >= simRouteLines.length) return "straight";
+
+            // 1. 交差点の手前のベクトル（どこから交差点に入ってきたか）
+            const pPre = simRouteLines[currentIndex - 2];
+            const pCur = simRouteLines[currentIndex];
+            
+            // 2. 交差点の先のベクトル（どこへ曲がっていくか）
+            // 次の指示のインデックスか、それがない場合は数個先の座標を使用
+            const targetNextIndex = Math.min(nextInstructionIndex, currentIndex + 5, simRouteLines.length - 1);
+            if (targetNextIndex <= currentIndex) return "straight";
+            const pNext = simRouteLines[targetNextIndex];
+
+            // 緯度経度から簡易的な平面ベクトルを算出
+            const vInX = pCur.lng - pPre.lng;
+            const vInY = pCur.lat - pPre.lat;
+            const vOutX = pNext.lng - pCur.lng;
+            const vOutY = pNext.lat - pCur.lat;
+
+            // 2つのベクトルの外積（クロスプロダクト）を計算
+            // これにより、進行方向に対して右側（時計回り）か左側（反時計回り）かが確実に分かります
+            const crossProduct = vInX * vOutY - vInY * vOutX;
+
+            // 2つのベクトルのなす角（内積から角度を算出）
+            const dotProduct = vInX * vOutX + vInY * vOutY;
+            const lenIn = Math.sqrt(vInX * vInX + vInY * vInY);
+            const lenOut = Math.sqrt(vOutX * vOutX + vOutY * vOutY);
+            if (lenIn === 0 || lenOut === 0) return "straight";
+            
+            const cosTheta = dotProduct / (lenIn * lenOut);
+            const angleDeg = Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
+
+            // あまり曲がっていない（25度未満）なら直進とみなす
+            if (angleDeg < 25) return "straight";
+
+            // 外積の符号で左右を判定（ Leafletの座標系に準拠 ）
+            if (crossProduct > 0) {
+                return angleDeg > 60 ? "left" : "slight-left";
+            } else {
+                return angleDeg > 60 ? "right" : "slight-right";
+            }
+        }
+
         function updateNavigationDisplay() {
             if (!simInstructions || simInstructions.length === 0) return;
 
             let currentInst = null;
             let distanceToNextTurn = 0;
+            let currentInstIndexInList = -1;
 
             for (let i = 0; i < simInstructions.length; i++) {
                 const inst = simInstructions[i];
@@ -212,6 +256,7 @@
                 
                 if (progressMeters >= instDistance) {
                     currentInst = inst;
+                    currentInstIndexInList = i;
                     if (i < simInstructions.length - 1) {
                         const nextInstDistance = getDistanceAtCoordinateIndex(simInstructions[i+1].index);
                         distanceToNextTurn = nextInstDistance - progressMeters;
@@ -223,31 +268,27 @@
 
             if (currentInst) {
                 let text = "道なりに直進します"; 
-                
-                const modifier = (currentInst.modifier || "").toLowerCase();
                 const type = (currentInst.type || "").toLowerCase();
-                const rawText = (currentInst.text || "").toLowerCase(); // 元の英語指示テキスト
 
-                // 1. ゴール判定
+                // 次の指示の座標インデックスを取得（外積計算の未来ベクトル用）
+                let nextTargetIdx = simRouteLines.length - 1;
+                if (currentInstIndexInList !== -1 && currentInstIndexInList < simInstructions.length - 1) {
+                    nextTargetIdx = simInstructions[currentInstIndexInList + 1].index;
+                }
+
+                // 数学ロジックによる正確な曲がり方向の算出
+                const calculatedDir = calculateTurnDirection(currentInst.index, nextTargetIdx);
+
                 if (type === "arrive" || progressMeters >= currentDistanceMeters - 5) {
                     text = "目的地に到着しました";
-                }
-                // 2. 進行方向（相対）に対して曲がる方向を判定
-                // OSRMの「text」プロパティに含まれる direction や、modifier、またはテキスト内の左折・右折指示をクロスチェック
-                else if (modifier === "left" || rawText.includes("turn left") || rawText.includes("bear left")) {
-                    text = "次を左折します";
-                } else if (modifier === "right" || rawText.includes("turn right") || rawText.includes("bear right")) {
-                    text = "次を右折します";
-                } else if (modifier === "sharp left" || rawText.includes("sharp left")) {
-                    text = "この先、急な左折です";
-                } else if (modifier === "sharp right" || rawText.includes("sharp right")) {
-                    text = "この先、急な右折です";
-                } else if (modifier === "slight left" || rawText.includes("slight left")) {
-                    text = "やや左方向です";
-                } else if (modifier === "slight right" || rawText.includes("slight right")) {
-                    text = "やや右方向です";
                 } else if (type === "depart") {
                     text = "直進して出発します";
+                } else {
+                    if (calculatedDir === "left") text = "次を左折します";
+                    else if (calculatedDir === "right") text = "次を右折します";
+                    else if (calculatedDir === "slight-left") text = "やや左方向です";
+                    else if (calculatedDir === "slight-right") text = "やや右方向です";
+                    else text = "道なりに直進します";
                 }
 
                 document.getElementById('navi-instruction').innerText = text;
