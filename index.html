@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (高精度シミュレーター搭載版)</title>
+    <title>道案内システム (v1.1.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -13,8 +13,29 @@
 
     <style>
         html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; overflow: hidden; }
-        #main-container { display: flex; width: 100%; height: calc(100% - 160px); }
-        #map { flex: 1; height: 100%; }
+        
+        /* 地図とナビのコンテナ */
+        #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
+        #map { flex: 1; height: 100%; z-index: 1; }
+        
+        /* ★新設：左上のバージョン表示バッジ */
+        #version-badge {
+            position: absolute;
+            top: 10px;
+            left: 50px; /* Leafletのズームボタンと重ならないように調整 */
+            background: rgba(0, 0, 0, 0.75);
+            color: #00ffcc;
+            padding: 5px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            font-family: monospace;
+            border-radius: 4px;
+            border: 1px solid #00ffcc;
+            z-index: 1000; /* 地図より前面に出す */
+            pointer-events: none; /* クリックを阻害しない */
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        }
+
         #navi-panel {
             background: #222; color: #fff; padding: 20px; box-sizing: border-box;
             display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;
@@ -53,7 +74,10 @@
 <body>
 
     <div id="main-container">
+        <div id="version-badge">v1.1.0</div>
+        
         <div id="map"></div>
+        
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
             <div id="navi-distance">ーー 先</div>
@@ -72,8 +96,7 @@
         <div class="input-row">
             <label>目的地:</label>
             <input type="text" id="end-input" class="input-box" placeholder="目的地を入力（例：東京駅）">
-            <button id="set-end-btn" class="btn">ルート検索</button>
-            <button id="sim-btn" class="btn btn-warning" disabled>▶️ デモ走行開始</button>
+            <button id="set-set-btn" class="btn" id="set-end-btn">ルート検索</button> <button id="sim-btn" class="btn btn-warning" disabled>▶️ デモ走行開始</button>
             <select id="speed-mode" class="select-box">
                 <option value="1.1">🚶 徒歩モード (リアル時速4km)</option>
                 <option value="11.1">🚗 自動車モード (快速時速40km)</option>
@@ -92,10 +115,10 @@
 
         // 高精度シミュレーション用の変数
         let simTimer = null;
-        let simRouteLines = [];      // 詳細な歩行ルート座標
-        let simInstructions = [];    // 各案内地点(曲がり角)のデータ
-        let currentDistanceMeters = 0; // ルートの総距離
-        let progressMeters = 0;      // スタートからの進んだ距離(m)
+        let simRouteLines = [];      
+        let simInstructions = [];    
+        let currentDistanceMeters = 0; 
+        let progressMeters = 0;      
         let isSimulating = false;
 
         const followBtn = document.getElementById('follow-btn');
@@ -131,8 +154,9 @@
             searchLocation(query, (latLng) => { userLocation = latLng; updateLocationMarker(`現在地: ${query}`); if (destinationLatLng) calculateRoute(userLocation, destinationLatLng); });
         });
 
-        // 手動・目的地
-        document.getElementById('set-end-btn').addEventListener('click', () => {
+        // 手動・目的地 (ボタン要素を取得して処理)
+        const setEndBtn = document.querySelector('.input-row:nth-child(2) .btn');
+        setEndBtn.addEventListener('click', () => {
             const query = document.getElementById('end-input').value.trim(); if (!query) return;
             searchLocation(query, (latLng) => {
                 destinationLatLng = latLng;
@@ -166,7 +190,6 @@
             routeControl.on('routesfound', function(e) {
                 const route = e.routes[0];
                 
-                // シミュレーション中でなければ、ルート情報一式を初期化
                 if (!isSimulating) {
                     simRouteLines = route.coordinates;
                     simInstructions = route.instructions;
@@ -176,40 +199,34 @@
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
                 
-                // 現在の進行状況（progressMeters）をもとに、ナビ表示を正確に更新する
                 updateNavigationDisplay();
             });
         }
 
-        // ★新設: 現在の歩行距離(progressMeters)から案内表示を作るコア関数
+        // 案内表示を作るコア関数
         function updateNavigationDisplay() {
             if (!simInstructions || simInstructions.length === 0) return;
 
             let currentInst = null;
             let distanceToNextTurn = 0;
-            let accumulatedDistance = 0;
 
-            // 自分が今どの案内区間にいるかを計算
             for (let i = 0; i < simInstructions.length; i++) {
                 const inst = simInstructions[i];
-                // 各指示の index は simRouteLines の配列添字に対応している
                 const instDistance = getDistanceAtCoordinateIndex(inst.index);
                 
                 if (progressMeters >= instDistance) {
                     currentInst = inst;
-                    // 次の曲がり角までの距離
                     if (i < simInstructions.length - 1) {
                         const nextInstDistance = getDistanceAtCoordinateIndex(simInstructions[i+1].index);
                         distanceToNextTurn = nextInstDistance - progressMeters;
                     } else {
-                        distanceToNextTurn = currentDistanceMeters - progressMeters; // あとはゴールだけ
+                        distanceToNextTurn = currentDistanceMeters - progressMeters;
                     }
                 }
             }
 
             if (currentInst) {
                 let text = currentInst.text;
-                // 英語ナビの日本語化
                 if (text.includes("Head")) text = "直進して出発します";
                 else if (text.includes("Turn right")) text = "次を右折します";
                 else if (text.includes("Turn left")) text = "次を左折します";
@@ -217,10 +234,8 @@
                 else if (text.includes("slight right")) text = "やや右方向です";
                 else if (text.includes("slight left")) text = "やや左方向です";
 
-                // パネルの文字を更新
                 document.getElementById('navi-instruction').innerText = text;
                 
-                // 「あと何m」のリアルタイム表示
                 if (distanceToNextTurn > 10) {
                     if (distanceToNextTurn >= 1000) {
                         document.getElementById('navi-distance').innerText = `約 ${(distanceToNextTurn / 1000).toFixed(1)} km 先`;
@@ -231,19 +246,16 @@
                     document.getElementById('navi-distance').innerText = `まもなくです`;
                 }
 
-                // 新しい案内ポイントに入ったら音声通知
                 if (text !== lastInstruction) {
                     speak(text);
                     lastInstruction = text;
                 }
             }
 
-            // 下部ステータスには全体の残り距離を表示
             const remainingTotal = Math.max(0, currentDistanceMeters - progressMeters);
             updateStatus(`ナビ走行中... 全体の残り距離: ${(remainingTotal/1000).toFixed(2)} km`);
         }
 
-        // 特定の座標インデックスまでのルート上総距離を算出するヘルパー
         function getDistanceAtCoordinateIndex(targetIndex) {
             let dist = 0;
             for (let i = 0; i < targetIndex && i < simRouteLines.length - 1; i++) {
@@ -252,7 +264,6 @@
             return dist;
         }
 
-        // 現在の進んだメートル(m)に最も近いルート上の座標を逆引きするヘルパー
         function getCoordinateAtDistance(meters) {
             let currentDist = 0;
             for (let i = 0; i < simRouteLines.length - 1; i++) {
@@ -284,23 +295,16 @@
                 simBtn.innerText = "⏸️ 一時停止"; simBtn.className = "btn btn-danger";
                 isFollowing = true; updateFollowButton();
 
-                // 0.1秒(100ms)おきに細かく進むタイマーに変更
                 simTimer = setInterval(() => {
-                    // セレクトボックスから移動速度（1秒あたりの移動M）を取得
                     const speedPerSecond = parseFloat(document.getElementById('speed-mode').value);
-                    const speedPerDecisecond = speedPerSecond / 10; // 0.1秒間での進む距離
+                    const speedPerDecisecond = speedPerSecond / 10; 
 
                     progressMeters += speedPerDecisecond;
 
                     if (progressMeters < currentDistanceMeters) {
-                        // 正確な現在地の位置(緯度経度)を割り出し
                         userLocation = getCoordinateAtDistance(progressMeters);
-                        
-                        // マーカー更新
                         if (startMarker) startMarker.setLatLng(userLocation).setPopupContent("現在地 (デモ走行中)");
                         if (isFollowing) map.setView(userLocation, 17);
-
-                        // パネルおよび距離の同期更新
                         updateNavigationDisplay();
                     } else {
                         progressMeters = currentDistanceMeters;
@@ -310,7 +314,7 @@
                         document.getElementById('navi-distance').innerText = "お疲れ様でした";
                         updateStatus("デモ走行を終了しました。");
                     }
-                }, 100); // 100ミリ秒ごとに超高精度で実行
+                }, 100); 
             }
         });
 
