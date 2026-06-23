@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v1.2.0)</title>
+    <title>道案内システム (v1.3.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v1.2.0) */
+        /* 左上のバージョン表示バッジ (v1.3.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v1.2.0</div>
+        <div id="version-badge">v1.3.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -199,7 +199,7 @@
             });
         }
 
-        // ★大幅改良：データコード判定により100%曲がり角を検知する関数
+        // ★修正点：指示データテキストと modifier を組み合わせて「進行方向に対する左右」を厳密に抽出
         function updateNavigationDisplay() {
             if (!simInstructions || simInstructions.length === 0) return;
 
@@ -222,29 +222,30 @@
             }
 
             if (currentInst) {
-                let text = "道なりに直進します"; // デフォルト
+                let text = "道なりに直進します"; 
                 
-                // OSRMの内部データコード（modifierとtype）を取得
                 const modifier = (currentInst.modifier || "").toLowerCase();
                 const type = (currentInst.type || "").toLowerCase();
+                const rawText = (currentInst.text || "").toLowerCase(); // 元の英語指示テキスト
 
-                // 1. まずゴール判定
+                // 1. ゴール判定
                 if (type === "arrive" || progressMeters >= currentDistanceMeters - 5) {
                     text = "目的地に到着しました";
                 }
-                // 2. 内部コードによる高精度な方向判定
-                else if (modifier === "right") {
-                    text = "次を右折します";
-                } else if (modifier === "left") {
+                // 2. 進行方向（相対）に対して曲がる方向を判定
+                // OSRMの「text」プロパティに含まれる direction や、modifier、またはテキスト内の左折・右折指示をクロスチェック
+                else if (modifier === "left" || rawText.includes("turn left") || rawText.includes("bear left")) {
                     text = "次を左折します";
-                } else if (modifier === "sharp right") {
-                    text = "この先、急な右折です";
-                } else if (modifier === "sharp left") {
+                } else if (modifier === "right" || rawText.includes("turn right") || rawText.includes("bear right")) {
+                    text = "次を右折します";
+                } else if (modifier === "sharp left" || rawText.includes("sharp left")) {
                     text = "この先、急な左折です";
-                } else if (modifier === "slight right") {
-                    text = "やや右方向です";
-                } else if (modifier === "slight left") {
+                } else if (modifier === "sharp right" || rawText.includes("sharp right")) {
+                    text = "この先、急な右折です";
+                } else if (modifier === "slight left" || rawText.includes("slight left")) {
                     text = "やや左方向です";
+                } else if (modifier === "slight right" || rawText.includes("slight right")) {
+                    text = "やや右方向です";
                 } else if (type === "depart") {
                     text = "直進して出発します";
                 }
