@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v1.1.0)</title>
+    <title>道案内システム (v1.2.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -14,15 +14,14 @@
     <style>
         html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; overflow: hidden; }
         
-        /* 地図とナビのコンテナ */
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* ★新設：左上のバージョン表示バッジ */
+        /* 左上のバージョン表示バッジ (v1.2.0) */
         #version-badge {
             position: absolute;
             top: 10px;
-            left: 50px; /* Leafletのズームボタンと重ならないように調整 */
+            left: 50px; 
             background: rgba(0, 0, 0, 0.75);
             color: #00ffcc;
             padding: 5px 10px;
@@ -31,8 +30,8 @@
             font-family: monospace;
             border-radius: 4px;
             border: 1px solid #00ffcc;
-            z-index: 1000; /* 地図より前面に出す */
-            pointer-events: none; /* クリックを阻害しない */
+            z-index: 1000; 
+            pointer-events: none; 
             box-shadow: 0 2px 5px rgba(0,0,0,0.3);
         }
 
@@ -74,10 +73,8 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v1.1.0</div>
-        
+        <div id="version-badge">v1.2.0</div>
         <div id="map"></div>
-        
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
             <div id="navi-distance">ーー 先</div>
@@ -96,7 +93,8 @@
         <div class="input-row">
             <label>目的地:</label>
             <input type="text" id="end-input" class="input-box" placeholder="目的地を入力（例：東京駅）">
-            <button id="set-set-btn" class="btn" id="set-end-btn">ルート検索</button> <button id="sim-btn" class="btn btn-warning" disabled>▶️ デモ走行開始</button>
+            <button id="set-end-btn" class="btn">ルート検索</button>
+            <button id="sim-btn" class="btn btn-warning" disabled>▶️ デモ走行開始</button>
             <select id="speed-mode" class="select-box">
                 <option value="1.1">🚶 徒歩モード (リアル時速4km)</option>
                 <option value="11.1">🚗 自動車モード (快速時速40km)</option>
@@ -113,7 +111,6 @@
         let userLocation = null, destinationLatLng = null, watchId = null;
         let lastInstruction = "", isFollowing = true; 
 
-        // 高精度シミュレーション用の変数
         let simTimer = null;
         let simRouteLines = [];      
         let simInstructions = [];    
@@ -154,9 +151,8 @@
             searchLocation(query, (latLng) => { userLocation = latLng; updateLocationMarker(`現在地: ${query}`); if (destinationLatLng) calculateRoute(userLocation, destinationLatLng); });
         });
 
-        // 手動・目的地 (ボタン要素を取得して処理)
-        const setEndBtn = document.querySelector('.input-row:nth-child(2) .btn');
-        setEndBtn.addEventListener('click', () => {
+        // 手動・目的地 
+        document.getElementById('set-end-btn').addEventListener('click', () => {
             const query = document.getElementById('end-input').value.trim(); if (!query) return;
             searchLocation(query, (latLng) => {
                 destinationLatLng = latLng;
@@ -203,7 +199,7 @@
             });
         }
 
-        // 案内表示を作るコア関数
+        // ★大幅改良：データコード判定により100%曲がり角を検知する関数
         function updateNavigationDisplay() {
             if (!simInstructions || simInstructions.length === 0) return;
 
@@ -226,17 +222,36 @@
             }
 
             if (currentInst) {
-                let text = currentInst.text;
-                if (text.includes("Head")) text = "直進して出発します";
-                else if (text.includes("Turn right")) text = "次を右折します";
-                else if (text.includes("Turn left")) text = "次を左折します";
-                else if (text.includes("You have arrived")) text = "目的地に到着しました";
-                else if (text.includes("slight right")) text = "やや右方向です";
-                else if (text.includes("slight left")) text = "やや左方向です";
+                let text = "道なりに直進します"; // デフォルト
+                
+                // OSRMの内部データコード（modifierとtype）を取得
+                const modifier = (currentInst.modifier || "").toLowerCase();
+                const type = (currentInst.type || "").toLowerCase();
+
+                // 1. まずゴール判定
+                if (type === "arrive" || progressMeters >= currentDistanceMeters - 5) {
+                    text = "目的地に到着しました";
+                }
+                // 2. 内部コードによる高精度な方向判定
+                else if (modifier === "right") {
+                    text = "次を右折します";
+                } else if (modifier === "left") {
+                    text = "次を左折します";
+                } else if (modifier === "sharp right") {
+                    text = "この先、急な右折です";
+                } else if (modifier === "sharp left") {
+                    text = "この先、急な左折です";
+                } else if (modifier === "slight right") {
+                    text = "やや右方向です";
+                } else if (modifier === "slight left") {
+                    text = "やや左方向です";
+                } else if (type === "depart") {
+                    text = "直進して出発します";
+                }
 
                 document.getElementById('navi-instruction').innerText = text;
                 
-                if (distanceToNextTurn > 10) {
+                if (distanceToNextTurn > 10 && text !== "目的地に到着しました") {
                     if (distanceToNextTurn >= 1000) {
                         document.getElementById('navi-distance').innerText = `約 ${(distanceToNextTurn / 1000).toFixed(1)} km 先`;
                     } else {
