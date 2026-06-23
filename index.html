@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (シミュレーションモード搭載)</title>
+    <title>道案内システム (速度切り替え機能付き)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container {
             display: flex;
             width: 100%;
-            height: calc(100% - 160px); /* 操作パネルが高くなった分を調整 */
+            height: calc(100% - 160px); 
         }
 
         #map { flex: 1; height: 100%; }
@@ -63,6 +63,7 @@
         .input-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
         .input-row label { width: 60px; font-weight: bold; font-size: 13px; }
         .input-box { flex: 1; min-width: 150px; padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; }
+        .select-box { padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; }
         .btn { padding: 6px 12px; font-size: 13px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
         .btn-secondary { background: #6c757d; }
         .btn-success { background: #28a745; }
@@ -96,6 +97,11 @@
             <button id="set-end-btn" class="btn">ルート検索</button>
             
             <button id="sim-btn" class="btn btn-warning" disabled>▶️ デモ走行開始</button>
+            
+            <select id="speed-mode" class="select-box">
+                <option value="1">🚶 徒歩モード (等速)</option>
+                <option value="8" selected>🚗 自動車モード (快速)</option>
+            </select>
         </div>
 
         <div id="status">現在地と目的地を設定すると、ルート検索とデモ走行が可能になります。</div>
@@ -117,11 +123,11 @@
         let lastInstruction = "";
         let isFollowing = true; 
 
-        // ★シミュレーション用の変数
-        let simInterval = null;      // タイマー用
-        let simCoordinates = [];     // ルートの全座標を格納する配列
-        let simIndex = 0;            // 現在どこを走っているかのインデックス
-        let isSimulating = false;    // シミュレーション中フラグ
+        // シミュレーション用の変数
+        let simInterval = null;      
+        let simCoordinates = [];     
+        let simIndex = 0;            
+        let isSimulating = false;    
 
         // 追従ボタンの処理
         const followBtn = document.getElementById('follow-btn');
@@ -134,7 +140,7 @@
             if (isFollowing) {
                 followBtn.innerText = "🔄 追従:ON";
                 followBtn.className = "btn btn-success";
-                if (userLocation) map.setView(userLocation, 17); // デモ中は少しズームを深くすると見やすい
+                if (userLocation) map.setView(userLocation, 17); 
             } else {
                 followBtn.innerText = "🛑 追従:OFF";
                 followBtn.className = "btn btn-secondary";
@@ -234,10 +240,9 @@
                 const routes = e.routes;
                 const summary = routes[0].summary;
                 
-                // ★シミュレーション用に、ルートの全線の座標配列を保存する
                 if (!isSimulating) {
                     simCoordinates = routes[0].coordinates;
-                    document.getElementById('sim-btn').disabled = false; // デモボタンを有効化
+                    document.getElementById('sim-btn').disabled = false; 
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
 
@@ -261,40 +266,36 @@
             });
         }
 
-        // ★新設: シミュレーション（デモ走行）のコントロール処理
+        // シミュレーション（デモ走行）のコントロール処理
         const simBtn = document.getElementById('sim-btn');
         simBtn.addEventListener('click', () => {
             if (isSimulating) {
-                // 一時停止処理
                 clearInterval(simInterval);
                 isSimulating = false;
                 simBtn.innerText = "▶️ デモ走行再開";
                 simBtn.className = "btn btn-warning";
                 updateStatus("デモ走行を一時停止しました。");
             } else {
-                // 走行開始処理
-                if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; } // リアルGPSは止める
+                if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; } 
                 isSimulating = true;
                 simBtn.innerText = "⏸️ 一時停止";
                 simBtn.className = "btn btn-danger";
-                isFollowing = true; // デモ開始時は自動追従オン
+                isFollowing = true; 
                 updateFollowButton();
 
-                // 最初からの場合はインデックスをリセット
                 if (simIndex >= simCoordinates.length - 1) simIndex = 0;
 
-                // タイマー起動（1秒ごとに次の座標へ進む）
                 simInterval = setInterval(() => {
                     if (simIndex < simCoordinates.length) {
                         const coord = simCoordinates[simIndex];
-                        userLocation = L.latLng(coord.lat, coord.lng); // 現在地を疑似更新
+                        userLocation = L.latLng(coord.lat, coord.lng); 
                         
                         updateLocationMarker("現在地 (デモ走行中)");
-                        
-                        // 現在地が動いたので、目的地までのルートとナビ情報を再計算
                         calculateRoute(userLocation, destinationLatLng);
                         
-                        simIndex += 5; // ★進むスピード調整（数字を大きくすると早送りに。1だと徒歩、5だと自転車/車くらい）
+                        // ★Web上のセレクトボックスから「進む歩数（スピード）」を取得して反映
+                        const speedStep = parseInt(document.getElementById('speed-mode').value);
+                        simIndex += speedStep; 
                     } else {
                         stopSimulation();
                         updateStatus("目的地に到着したため、デモ走行を終了しました。");
@@ -303,7 +304,6 @@
             }
         });
 
-        // シミュレーションを安全に完全停止する関数
         function stopSimulation() {
             clearInterval(simInterval);
             isSimulating = false;
