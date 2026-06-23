@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (ナビパネル＆追従モード搭載)</title>
+    <title>道案内システム (シミュレーションモード搭載)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -14,17 +14,14 @@
     <style>
         html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; overflow: hidden; }
         
-        /* 全体のレイアウトコンテナ */
         #main-container {
             display: flex;
             width: 100%;
-            height: calc(100% - 130px); /* 下部操作パネルの分を引く */
+            height: calc(100% - 160px); /* 操作パネルが高くなった分を調整 */
         }
 
-        /* 1. 地図エリア */
         #map { flex: 1; height: 100%; }
 
-        /* 2. 大型ナビゲーションパネル */
         #navi-panel {
             background: #222;
             color: #fff;
@@ -39,23 +36,20 @@
         #navi-instruction { font-size: 28px; font-weight: bold; margin-bottom: 10px; color: #00ffcc; }
         #navi-distance { font-size: 20px; color: #ccc; }
 
-        /* --- レポンシブ対応（画面の向きでナビ位置を切り替え） --- */
-        /* PCなど横長画面（デフォルト）: ナビは右側 */
         @media (orientation: landscape) {
             #main-container { flex-direction: row; }
             #navi-panel { width: 320px; height: 100%; border-left: 4px solid #007bff; }
         }
-        /* スマホなど縦長画面: ナビは上側 */
         @media (orientation: portrait) {
-            #main-container { flex-direction: column-reverse; } /* 地図が下、ナビが上 */
+            #main-container { flex-direction: column-reverse; }
             #navi-panel { width: 100%; height: 140px; border-bottom: 4px solid #007bff; }
             #navi-instruction { font-size: 22px; }
             #navi-distance { font-size: 16px; }
         }
 
-        /* 3. 下部操作パネル（設定関係） */
+        /* 下部操作パネル */
         #control-panel { 
-            height: 130px; 
+            height: 160px; 
             background: #f8f9fa; 
             padding: 12px; 
             box-sizing: border-box; 
@@ -66,12 +60,14 @@
             position: relative;
             z-index: 1000;
         }
-        .input-row { display: flex; align-items: center; gap: 8px; }
+        .input-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
         .input-row label { width: 60px; font-weight: bold; font-size: 13px; }
-        .input-box { flex: 1; padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; }
+        .input-box { flex: 1; min-width: 150px; padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; }
         .btn { padding: 6px 12px; font-size: 13px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
         .btn-secondary { background: #6c757d; }
         .btn-success { background: #28a745; }
+        .btn-warning { background: #ffc107; color: #212529; }
+        .btn-danger { background: #dc3545; }
         #status { font-size: 12px; color: #666; font-weight: bold; }
     </style>
 </head>
@@ -79,7 +75,6 @@
 
     <div id="main-container">
         <div id="map"></div>
-        
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
             <div id="navi-distance">ーー km 先</div>
@@ -99,13 +94,14 @@
             <label>目的地:</label>
             <input type="text" id="end-input" class="input-box" placeholder="目的地を入力（例：東京駅）">
             <button id="set-end-btn" class="btn">ルート検索</button>
+            
+            <button id="sim-btn" class="btn btn-warning" disabled>▶️ デモ走行開始</button>
         </div>
 
-        <div id="status">現在地と目的地を設定すると、ここに詳細情報が表示されます。</div>
+        <div id="status">現在地と目的地を設定すると、ルート検索とデモ走行が可能になります。</div>
     </div>
 
     <script>
-        // --- 基本設定 ---
         const map = L.map('map').setView([35.6812, 139.7671], 14);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '&copy; OpenStreetMap contributors'
@@ -119,98 +115,73 @@
         let destinationLatLng = null;
         let watchId = null;
         let lastInstruction = "";
-        
-        // 追従モードの状態（true = ON, false = OFF）
         let isFollowing = true; 
 
-        // --- 追従ボタンの切り替え処理 ---
+        // ★シミュレーション用の変数
+        let simInterval = null;      // タイマー用
+        let simCoordinates = [];     // ルートの全座標を格納する配列
+        let simIndex = 0;            // 現在どこを走っているかのインデックス
+        let isSimulating = false;    // シミュレーション中フラグ
+
+        // 追従ボタンの処理
         const followBtn = document.getElementById('follow-btn');
         followBtn.addEventListener('click', () => {
             isFollowing = !isFollowing;
+            updateFollowButton();
+        });
+
+        function updateFollowButton() {
             if (isFollowing) {
                 followBtn.innerText = "🔄 追従:ON";
                 followBtn.className = "btn btn-success";
-                // ONにした瞬間に、もし現在地があればカメラを戻す
-                if (userLocation) map.setView(userLocation, 16);
+                if (userLocation) map.setView(userLocation, 17); // デモ中は少しズームを深くすると見やすい
             } else {
                 followBtn.innerText = "🛑 追従:OFF";
                 followBtn.className = "btn btn-secondary";
             }
-        });
+        }
 
-        // ユーザーが地図を手動でドラッグしたら、自動的に追従をOFFにする親切設計
         map.on('movestart', (e) => {
-            if (e.hard) return; // プログラミング的な移動なら無視
+            if (e.hard) return; 
             if (isFollowing) {
                 isFollowing = false;
-                followBtn.innerText = "🛑 追従:OFF";
-                followBtn.className = "btn btn-secondary";
+                updateFollowButton();
             }
         });
 
-
-        // --- パターンA: GPSで現在地を取得する処理 ---
+        // GPS取得
         document.getElementById('gps-btn').addEventListener('click', () => {
+            stopSimulation();
             document.getElementById('start-input').value = "";
-            if (!navigator.geolocation) {
-                updateStatus("⚠️ GPSに対応していません。");
-                return;
-            }
+            if (!navigator.geolocation) return updateStatus("⚠️ GPS非対応");
 
             updateStatus("GPS位置情報を取得中...");
             if (watchId !== null) navigator.geolocation.clearWatch(watchId);
 
             watchId = navigator.geolocation.watchPosition(function(position) {
                 userLocation = L.latLng(position.coords.latitude, position.coords.longitude);
-                
-                if (!startMarker) {
-                    startMarker = L.marker(userLocation).addTo(map).bindPopup("現在地 (GPS)").openPopup();
-                } else {
-                    startMarker.setLatLng(userLocation);
-                }
-
-                // ★追従モードがONのときだけ、カメラを現在地に固定する
-                if (isFollowing) {
-                    map.setView(userLocation, 16);
-                }
-
-                updateStatus("GPSで現在地を更新中...");
-
-                if (destinationLatLng) {
-                    calculateRoute(userLocation, destinationLatLng);
-                }
+                updateLocationMarker("現在地 (GPS)");
+                if (destinationLatLng) calculateRoute(userLocation, destinationLatLng);
             }, function() {
-                updateStatus("⚠️ GPSの取得に失敗しました。");
+                updateStatus("⚠️ GPS取得失敗");
             }, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 });
         });
 
-        // --- パターンB: 現在地を文字入力で指定する処理 ---
+        // 現在地文字入力
         document.getElementById('set-start-btn').addEventListener('click', () => {
+            stopSimulation();
             const query = document.getElementById('start-input').value.trim();
             if (!query) return;
-            
-            if (watchId !== null) {
-                navigator.geolocation.clearWatch(watchId);
-                watchId = null;
-            }
+            if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
 
             searchLocation(query, (latLng) => {
                 userLocation = latLng;
-                if (!startMarker) {
-                    startMarker = L.marker(userLocation).addTo(map).bindPopup(`現在地: ${query}`).openPopup();
-                } else {
-                    startMarker.setLatLng(userLocation).setPopupContent(`現在地: ${query}`).openPopup();
-                }
-                map.setView(userLocation, 15);
-                updateStatus(`現在地を設定しました: ${query}`);
-
-                if (destinationLatLng) {
-                    calculateRoute(userLocation, destinationLatLng);
-                }
+                updateLocationMarker(`現在地: ${query}`);
+                if (destinationLatLng) calculateRoute(userLocation, destinationLatLng);
             });
         });
 
-        // --- 目的地の文字入力設定 ---
+        // 目的地文字入力
         document.getElementById('set-end-btn').addEventListener('click', () => {
             const query = document.getElementById('end-input').value.trim();
             if (!query) return;
@@ -220,37 +191,36 @@
                 if (!endMarker) {
                     endMarker = L.marker(destinationLatLng).addTo(map).bindPopup(`目的地: ${query}`).openPopup();
                 } else {
-                    endMarker.setLatLng(destinationLatLng).setPopupContent(`目的地: ${query}`).openPopup();
+                    endMarker.setLatLng(destinationLatLng).setPopupContent(`目的地: ${query}`);
                 }
-                updateStatus(`目的地を設定しました: ${query}`);
                 speak(`目的地を${query}に設定しました。`);
-
-                if (userLocation) {
-                    calculateRoute(userLocation, destinationLatLng);
-                }
+                if (userLocation) calculateRoute(userLocation, destinationLatLng);
             });
         });
 
-        // --- 地名検索 ---
+        function updateLocationMarker(popupText) {
+            if (!startMarker) {
+                startMarker = L.marker(userLocation).addTo(map).bindPopup(popupText).openPopup();
+            } else {
+                startMarker.setLatLng(userLocation).setPopupContent(popupText);
+            }
+            if (isFollowing) map.setView(userLocation, 16);
+        }
+
         function searchLocation(query, callback) {
             const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
-            fetch(url)
-            .then(response => response.json())
-            .then(data => {
+            fetch(url).then(res => res.json()).then(data => {
                 if (data && data.length > 0) {
                     callback(L.latLng(parseFloat(data[0].lat), parseFloat(data[0].lon)));
                 } else {
-                    updateStatus(`⚠️ 「${query}」が見つかりませんでした。`);
+                    updateStatus(`⚠️ 「${query}」が見つかりません。`);
                 }
-            })
-            .catch(() => updateStatus("⚠️ 通信エラーが発生しました。"));
+            }).catch(() => updateStatus("⚠️ 通信エラー"));
         }
 
-        // --- ルート検索 ＆ ナビ表示機能 ---
+        // ルート検索
         function calculateRoute(start, end) {
-            if (routeControl) {
-                map.removeControl(routeControl);
-            }
+            if (routeControl) map.removeControl(routeControl);
 
             routeControl = L.Routing.control({
                 waypoints: [start, end],
@@ -264,32 +234,84 @@
                 const routes = e.routes;
                 const summary = routes[0].summary;
                 
+                // ★シミュレーション用に、ルートの全線の座標配列を保存する
+                if (!isSimulating) {
+                    simCoordinates = routes[0].coordinates;
+                    document.getElementById('sim-btn').disabled = false; // デモボタンを有効化
+                    updateStatus("ルート確定。デモ走行が可能です。");
+                }
+
                 if (routes[0].instructions && routes[0].instructions.length > 0) {
                     const nextStep = routes[0].instructions[0];
                     let instructionText = nextStep.text;
 
-                    // 英語の指示を日本語に簡易翻訳
                     if (instructionText.includes("Head")) instructionText = "直進して出発します";
                     if (instructionText.includes("Turn right")) instructionText = "次を右折します";
                     if (instructionText.includes("Turn left")) instructionText = "次を左折します";
                     if (instructionText.includes("You have arrived")) instructionText = "目的地に到着しました";
 
-                    // ★新設：大型ナビゲーションパネルの文字を書き換える
                     document.getElementById('navi-instruction').innerText = instructionText;
                     document.getElementById('navi-distance').innerText = `残り 約 ${(summary.totalDistance / 1000).toFixed(1)} km`;
 
-                    // 音声案内
                     if (instructionText !== lastInstruction) {
                         speak(instructionText);
                         lastInstruction = instructionText;
                     }
-                    
-                    updateStatus(`ルート探索完了。ナビゲーション中...`);
                 }
             });
         }
 
-        // --- 音声合成 ---
+        // ★新設: シミュレーション（デモ走行）のコントロール処理
+        const simBtn = document.getElementById('sim-btn');
+        simBtn.addEventListener('click', () => {
+            if (isSimulating) {
+                // 一時停止処理
+                clearInterval(simInterval);
+                isSimulating = false;
+                simBtn.innerText = "▶️ デモ走行再開";
+                simBtn.className = "btn btn-warning";
+                updateStatus("デモ走行を一時停止しました。");
+            } else {
+                // 走行開始処理
+                if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; } // リアルGPSは止める
+                isSimulating = true;
+                simBtn.innerText = "⏸️ 一時停止";
+                simBtn.className = "btn btn-danger";
+                isFollowing = true; // デモ開始時は自動追従オン
+                updateFollowButton();
+
+                // 最初からの場合はインデックスをリセット
+                if (simIndex >= simCoordinates.length - 1) simIndex = 0;
+
+                // タイマー起動（1秒ごとに次の座標へ進む）
+                simInterval = setInterval(() => {
+                    if (simIndex < simCoordinates.length) {
+                        const coord = simCoordinates[simIndex];
+                        userLocation = L.latLng(coord.lat, coord.lng); // 現在地を疑似更新
+                        
+                        updateLocationMarker("現在地 (デモ走行中)");
+                        
+                        // 現在地が動いたので、目的地までのルートとナビ情報を再計算
+                        calculateRoute(userLocation, destinationLatLng);
+                        
+                        simIndex += 5; // ★進むスピード調整（数字を大きくすると早送りに。1だと徒歩、5だと自転車/車くらい）
+                    } else {
+                        stopSimulation();
+                        updateStatus("目的地に到着したため、デモ走行を終了しました。");
+                    }
+                }, 1000);
+            }
+        });
+
+        // シミュレーションを安全に完全停止する関数
+        function stopSimulation() {
+            clearInterval(simInterval);
+            isSimulating = false;
+            simIndex = 0;
+            simBtn.innerText = "▶️ デモ走行開始";
+            simBtn.className = "btn btn-warning";
+        }
+
         function speak(text) {
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.cancel();
