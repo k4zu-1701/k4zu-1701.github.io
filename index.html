@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v2.0.0)</title>
+    <title>道案内システム (v2.1.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v2.0.0) */
+        /* 左上のバージョン表示バッジ (v2.1.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v2.0.0</div>
+        <div id="version-badge">v2.1.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -118,10 +118,10 @@
         let progressMeters = 0;      
         let isSimulating = false;
 
-        // ★v2.0.0 スマート・ターゲット・ロック用変数
+        // v2.1.0 単一ターゲット固定用の変数
         let lockedDirection = "straight";
         let lockedTurnMeters = 0;
-        let lastDisplayUpdateTime = 0; // 1秒間隔の表示更新タイマー用
+        let lastDisplayUpdateTime = 0; 
 
         const followBtn = document.getElementById('follow-btn');
         followBtn.addEventListener('click', () => { isFollowing = !isFollowing; updateFollowButton(); });
@@ -202,21 +202,29 @@
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
                 
-                updateNavigationDisplay(true); // 初回は強制描画
+                updateNavigationDisplay(true); 
             });
         }
 
-        // ★v2.0.0 コアロジック：裏で探し続け、固定値と大きくズレていなければ現在の固定値を死守する
+        // ★v2.1.0 コアロジック：一度ロックしたら、その交差点を通過するまで先のスキャンを打ち切る
         function scanAheadWithTargetLock(currentMeters) {
             if (simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // すでに曲がり角を通過した（現在地がロック位置を4m超えた）場合はロックを完全解除
-            if (lockedDirection !== "straight" && currentMeters > lockedTurnMeters + 4) {
+            // 現在地がすでにロック位置を通り過ぎた（3m超えた）場合はロックを解除して次に進む
+            if (lockedDirection !== "straight" && currentMeters > lockedTurnMeters + 3) {
                 lockedDirection = "straight";
                 lockedTurnMeters = 0;
             }
 
-            // --- 裏での探索フェーズ ---
+            // 【重要】すでにロック中のターゲットがある場合、それより遠くはスキャンしない（最大スキャン距離をロック位置までに制限する）
+            let maxScanDistance = 120;
+            if (lockedDirection !== "straight") {
+                // すでにロックしている交差点までの残り距離を算出し、スキャン枠の上限にする
+                const remainingToLock = lockedTurnMeters - currentMeters;
+                // ロック位置の周辺（前後10m）だけを生存確認用としてスキャンし、それより先は見ない
+                maxScanDistance = Math.min(120, remainingToLock + 10);
+            }
+
             const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 5));
             const pCur = getCoordinateAtDistance(currentMeters);
             const vInX = pCur.lng - pPre.lng;
@@ -229,9 +237,8 @@
 
             if (lenIn > 0) {
                 const step = 2;
-                const maxScan = 120;
 
-                for (let d = 4; d <= maxScan; d += step) {
+                for (let d = 4; d <= maxScanDistance; d += step) {
                     const futureMeters = currentMeters + d;
                     if (futureMeters >= currentDistanceMeters) break;
 
@@ -261,14 +268,15 @@
                 }
             }
 
-            // --- ロック判定・更新フェーズ ---
+            // ロックの反映・微調整
             if (foundDirection !== "straight") {
                 if (lockedDirection === "straight") {
-                    // 1. 未ロック状態なら、見つかった場所で即座に新規ロック固定
+                    // 未ロック状態なら即ロック
                     lockedDirection = foundDirection;
                     lockedTurnMeters = foundTurnMeters;
                 } else {
-                    // 2. すでにロック中の場合、裏で見つけた位置と「15m以上」大きくズレた場合のみ更新
+                    // すでにロック中の場合、同じ交差点内のわずかな補正（15m未満）か、
+                    // もしくはロック上限をすり抜けるほどルートが急変した（15m以上の大ズレ）場合のみ上書き
                     const discrepancy = Math.abs(lockedTurnMeters - foundTurnMeters);
                     if (discrepancy >= 15) {
                         lockedDirection = foundDirection;
@@ -280,15 +288,12 @@
             return { dir: lockedDirection, turnAbsoluteMeters: lockedTurnMeters };
         }
 
-        // 引数 forceUpdate が true の時は1秒待たずに即時画面更新する（音声用）
         function updateNavigationDisplay(forceUpdate = false) {
             if (!simRouteLines || simRouteLines.length === 0) return;
 
             const now = Date.now();
-            // 1秒に1回（1000ミリ秒）の間引き、または強制更新フラグ
             const shouldUpdateUI = forceUpdate || (now - lastDisplayUpdateTime >= 1000);
 
-            // ロジック計算（ロックと現在地による引き算）は常に裏で最新のprogressMetersを反映
             let text = "道なりに直進します";
             let distanceText = "ーー 先";
 
@@ -305,13 +310,15 @@
                 else text = "道なりに直進します";
 
                 if (scanResult.dir !== "straight" && scanResult.turnAbsoluteMeters > 0) {
-                    // 固定された位置（座標）と、刻々と進む現在地（progressMeters）で純粋引き算
                     const dynamicDist = scanResult.turnAbsoluteMeters - progressMeters;
 
                     if (dynamicDist >= 1000) {
                         distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
-                    } else if (dynamicDist <= 5) { // 5m以下でまもなく
+                    } else if (dynamicDist <= 4) { // 4m以下でまもなく
                         distanceText = `まもなくです`;
+                        if (dynamicDist < -1) {
+                            lockedDirection = "straight";
+                        }
                     } else {
                         distanceText = `あと ${Math.round(dynamicDist)} m 先`;
                     }
@@ -325,18 +332,15 @@
                 }
             }
 
-            // 画面への文字反映のみ1秒に1回に制限
             if (shouldUpdateUI) {
                 document.getElementById('navi-instruction').innerText = text;
                 document.getElementById('navi-distance').innerText = distanceText;
                 lastDisplayUpdateTime = now;
             }
 
-            // 音声案内はタイミングを逃さないよう、文言が変わった瞬間に即時実行
             if (text !== lastInstruction) {
                 speak(text);
                 lastInstruction = text;
-                // 音声が変わったらUIも即時同期
                 document.getElementById('navi-instruction').innerText = text;
                 document.getElementById('navi-distance').innerText = distanceText;
             }
@@ -386,7 +390,7 @@
                         userLocation = getCoordinateAtDistance(progressMeters);
                         if (startMarker) startMarker.setLatLng(userLocation).setPopupContent("現在地 (デモ走行中)");
                         if (isFollowing) map.setView(userLocation, 17);
-                        updateNavigationDisplay(false); // 0.1秒ごとに裏計算は回す
+                        updateNavigationDisplay(false); 
                     } else {
                         progressMeters = currentDistanceMeters;
                         updateNavigationDisplay(true);
