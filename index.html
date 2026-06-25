@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v1.7.0)</title>
+    <title>道案内システム (v1.8.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v1.7.0) */
+        /* 左上のバージョン表示バッジ (v1.8.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v1.7.0</div>
+        <div id="version-badge">v1.8.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -117,7 +117,6 @@
         let currentDistanceMeters = 0; 
         let progressMeters = 0;      
         let isSimulating = false;
-        let currentSegmentIndex = 0; 
 
         const followBtn = document.getElementById('follow-btn');
         followBtn.addEventListener('click', () => { isFollowing = !isFollowing; updateFollowButton(); });
@@ -192,7 +191,6 @@
                     simInstructions = route.instructions;
                     currentDistanceMeters = route.summary.totalDistance;
                     progressMeters = 0;
-                    currentSegmentIndex = 0;
                     document.getElementById('sim-btn').disabled = false;
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
@@ -201,30 +199,29 @@
             });
         }
 
-        // ★v1.7.0修正：曲がり角を発見した時、「現在のセグメント地点からの距離」ではなく「ルート全体の何メートル目か（絶対位置）」を返すように変更
-        function traceRouteLineForTurn(currentIndex) {
-            if (simRouteLines.length < 3 || currentIndex >= simRouteLines.length - 1) return { dir: "straight", absoluteMeters: 0 };
+        // ★v1.8.0コア修正：完全にインデックス依存を捨て、現在のメートル位置から前方150mを純粋に走査する
+        function scanAheadForTurn(currentMeters) {
+            if (simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            const startIdx = Math.max(1, currentIndex);
-            const pPre = simRouteLines[startIdx - 1];
-            const pCur = simRouteLines[startIdx];
+            // 現在地、および少し手前（進入方向の確認用）の仮想ベクトル
+            const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 4));
+            const pCur = getCoordinateAtDistance(currentMeters);
 
             const vInX = pCur.lng - pPre.lng;
             const vInY = pCur.lat - pPre.lat;
             const lenIn = Math.sqrt(vInX * vInX + vInY * vInY);
-            if (lenIn === 0) return { dir: "straight", absoluteMeters: 0 };
+            if (lenIn === 0) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // 現在のセグメント地点が、スタートから何メートル地点にあるかをまず計算
-            let baseMeters = getDistanceAtCoordinateIndex(startIdx);
-            let accumulatedDist = 0;
+            // 現在のメートル地点から、2メートル刻みで前方のルート線を120メートル先まで精密スキャン
+            const step = 2;
+            const maxScan = 120;
             
-            for (let i = startIdx; i < simRouteLines.length - 1; i++) {
-                const p1 = simRouteLines[i];
-                const p2 = simRouteLines[i + 1];
-                const segmentDist = L.latLng(p1).distanceTo(p2);
-                accumulatedDist += segmentDist;
+            for (let d = 4; d <= maxScan; d += step) {
+                const futureMeters = currentMeters + d;
+                if (futureMeters >= currentDistanceMeters) break;
 
-                if (accumulatedDist > 150) break; // 150m以上先は除外
+                const p1 = getCoordinateAtDistance(futureMeters);
+                const p2 = getCoordinateAtDistance(Math.min(currentDistanceMeters, futureMeters + 6)); // 先の傾き
 
                 const vOutX = p2.lng - p1.lng;
                 const vOutY = p2.lat - p1.lat;
@@ -235,7 +232,8 @@
                 const cosTheta = dotProduct / (lenIn * lenOut);
                 const angleDeg = Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
 
-                if (angleDeg >= 20) { // カーブ発見
+                // 22度以上の明らかな曲がりを検知した場合
+                if (angleDeg >= 22) {
                     const crossProduct = vInX * vOutY - vInY * vOutX;
                     let direction = "straight";
 
@@ -245,12 +243,12 @@
                         direction = angleDeg > 55 ? "right" : "slight-right";
                     }
 
-                    // 「曲がり角の絶対位置（スタートからの総距離）」を計算して返す
-                    return { dir: direction, absoluteMeters: baseMeters + accumulatedDist };
+                    // そのカーブが始まる「正確な未来のメートル位置」を返す
+                    return { dir: direction, turnAbsoluteMeters: futureMeters };
                 }
             }
 
-            return { dir: "straight", absoluteMeters: 0 };
+            return { dir: "straight", turnAbsoluteMeters: 0 };
         }
 
         function updateNavigationDisplay() {
@@ -259,32 +257,30 @@
             let text = "道なりに直進します";
             let distanceText = "ーー 先";
 
-            if (progressMeters >= currentDistanceMeters - 5) {
+            if (progressMeters >= currentDistanceMeters - 4) {
                 text = "目的地に到着しました";
                 distanceText = "お疲れ様でした";
             } else {
-                const traceResult = traceRouteLineForTurn(currentSegmentIndex);
+                // 完全メートルベースで前方をスキャン（タイムラグの発生源を根絶）
+                const scanResult = scanAheadForTurn(progressMeters);
 
-                if (traceResult.dir === "left") text = "次を左折します";
-                else if (traceResult.dir === "right") text = "次を右折します";
-                else if (traceResult.dir === "slight-left") text = "やや左方向です";
-                else if (traceResult.dir === "slight-right") text = "やや右方向です";
+                if (scanResult.dir === "left") text = "次を左折します";
+                else if (scanResult.dir === "right") text = "次を右折します";
+                else if (scanResult.dir === "slight-left") text = "やや左方向です";
+                else if (scanResult.dir === "slight-right") text = "やや右方向です";
                 else text = "道なりに直進します";
 
-                // ★距離表示のリアルタイム引き算処理
-                if (traceResult.dir !== "straight" && traceResult.absoluteMeters > 0) {
-                    // 曲がり角の絶対位置 から 現在進んだ距離 を引くことで、綺麗なカウントダウンを実現
-                    const dynamicDist = traceResult.absoluteMeters - progressMeters;
+                if (scanResult.dir !== "straight" && scanResult.turnAbsoluteMeters > 0) {
+                    const dynamicDist = scanResult.turnAbsoluteMeters - progressMeters;
 
                     if (dynamicDist >= 1000) {
                         distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
-                    } else if (dynamicDist <= 12) { // 12m以下になったら「まもなく」
+                    } else if (dynamicDist <= 8) { // 8m手前に入ったら「まもなく」表示に固定
                         distanceText = `まもなくです`;
                     } else {
                         distanceText = `あと ${Math.round(dynamicDist)} m 先`;
                     }
                 } else {
-                    // 直近に曲がり角がない場合は、全体のゴールまでの距離を表示
                     const remainingTotal = Math.max(0, currentDistanceMeters - progressMeters);
                     if (remainingTotal >= 1000) {
                         distanceText = `目的地まで ${(remainingTotal / 1000).toFixed(1)} km`;
@@ -304,30 +300,6 @@
 
             const remainingTotal = Math.max(0, currentDistanceMeters - progressMeters);
             updateStatus(`ナビ走行中... 全体の残り距離: ${(remainingTotal/1000).toFixed(2)} km`);
-        }
-
-        function getDistanceAtCoordinateIndex(targetIndex) {
-            let dist = 0;
-            for (let i = 0; i < targetIndex && i < simRouteLines.length - 1; i++) {
-                dist += L.latLng(simRouteLines[i]).distanceTo(simRouteLines[i+1]);
-            }
-            return dist;
-        }
-
-        function updateSegmentIndexByDistance(meters) {
-            let currentDist = 0;
-            for (let i = 0; i < simRouteLines.length - 1; i++) {
-                const p1 = L.latLng(simRouteLines[i]);
-                const p2 = L.latLng(simRouteLines[i+1]);
-                const segmentDist = p1.distanceTo(p2);
-                
-                if (currentDist + segmentDist >= meters) {
-                    currentSegmentIndex = i;
-                    return;
-                }
-                currentDist += segmentDist;
-            }
-            currentSegmentIndex = simRouteLines.length - 1;
         }
 
         function getCoordinateAtDistance(meters) {
@@ -366,7 +338,6 @@
                     const speedPerDecisecond = speedPerSecond / 10; 
 
                     progressMeters += speedPerDecisecond;
-                    updateSegmentIndexByDistance(progressMeters);
 
                     if (progressMeters < currentDistanceMeters) {
                         userLocation = getCoordinateAtDistance(progressMeters);
@@ -386,7 +357,7 @@
         });
 
         function stopSimulation() {
-            clearInterval(simTimer); isSimulating = false; progressMeters = 0; currentSegmentIndex = 0;
+            clearInterval(simTimer); isSimulating = false; progressMeters = 0;
             simBtn.innerText = "▶️ デモ走行開始"; simBtn.className = "btn btn-warning";
         }
 
