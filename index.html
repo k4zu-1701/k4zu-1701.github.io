@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v1.8.0)</title>
+    <title>道案内システム (v1.9.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v1.8.0) */
+        /* 左上のバージョン表示バッジ (v1.9.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v1.8.0</div>
+        <div id="version-badge">v1.9.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -117,6 +117,10 @@
         let currentDistanceMeters = 0; 
         let progressMeters = 0;      
         let isSimulating = false;
+
+        // ★v1.9.0 ブレ防止用のロック変数
+        let lockedDirection = "straight";
+        let lockedTurnMeters = 0;
 
         const followBtn = document.getElementById('follow-btn');
         followBtn.addEventListener('click', () => { isFollowing = !isFollowing; updateFollowButton(); });
@@ -191,6 +195,8 @@
                     simInstructions = route.instructions;
                     currentDistanceMeters = route.summary.totalDistance;
                     progressMeters = 0;
+                    lockedDirection = "straight";
+                    lockedTurnMeters = 0;
                     document.getElementById('sim-btn').disabled = false;
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
@@ -199,29 +205,37 @@
             });
         }
 
-        // ★v1.8.0コア修正：完全にインデックス依存を捨て、現在のメートル位置から前方150mを純粋に走査する
+        // ★v1.9.0 コア修正：前方スキャンの中で「最も深く曲がっている角度」を探してブレを無くす
         function scanAheadForTurn(currentMeters) {
             if (simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // 現在地、および少し手前（進入方向の確認用）の仮想ベクトル
-            const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 4));
-            const pCur = getCoordinateAtDistance(currentMeters);
+            // すでにロックされた曲がり角の途中にいる場合、その判定を維持する（15m手前から交差点通過まで）
+            if (lockedDirection !== "straight" && currentMeters < lockedTurnMeters + 6) {
+                if (lockedTurnMeters - currentMeters > -4) { // 通り過ぎて4m進むまではロック維持
+                    return { dir: lockedDirection, turnAbsoluteMeters: lockedTurnMeters };
+                }
+            }
 
+            const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 5));
+            const pCur = getCoordinateAtDistance(currentMeters);
             const vInX = pCur.lng - pPre.lng;
             const vInY = pCur.lat - pPre.lat;
             const lenIn = Math.sqrt(vInX * vInX + vInY * vInY);
             if (lenIn === 0) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // 現在のメートル地点から、2メートル刻みで前方のルート線を120メートル先まで精密スキャン
             const step = 2;
             const maxScan = 120;
             
+            let maxAngleFound = 0;
+            let bestDirection = "straight";
+            let bestTurnMeters = 0;
+
             for (let d = 4; d <= maxScan; d += step) {
                 const futureMeters = currentMeters + d;
                 if (futureMeters >= currentDistanceMeters) break;
 
                 const p1 = getCoordinateAtDistance(futureMeters);
-                const p2 = getCoordinateAtDistance(Math.min(currentDistanceMeters, futureMeters + 6)); // 先の傾き
+                const p2 = getCoordinateAtDistance(Math.min(currentDistanceMeters, futureMeters + 8));
 
                 const vOutX = p2.lng - p1.lng;
                 const vOutY = p2.lat - p1.lat;
@@ -232,23 +246,27 @@
                 const cosTheta = dotProduct / (lenIn * lenOut);
                 const angleDeg = Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
 
-                // 22度以上の明らかな曲がりを検知した場合
-                if (angleDeg >= 22) {
+                // 単に最初に見つけた角度ではなく、その交差点エリアで「一番深い（曲がっている）角度」を記憶する
+                if (angleDeg >= 22 && angleDeg > maxAngleFound) {
+                    maxAngleFound = angleDeg;
+                    bestTurnMeters = futureMeters;
+
                     const crossProduct = vInX * vOutY - vInY * vOutX;
-                    let direction = "straight";
-
                     if (crossProduct > 0) {
-                        direction = angleDeg > 55 ? "left" : "slight-left";
+                        bestDirection = angleDeg > 55 ? "left" : "slight-left";
                     } else {
-                        direction = angleDeg > 55 ? "right" : "slight-right";
+                        bestDirection = angleDeg > 55 ? "right" : "slight-right";
                     }
-
-                    // そのカーブが始まる「正確な未来のメートル位置」を返す
-                    return { dir: direction, turnAbsoluteMeters: futureMeters };
                 }
             }
 
-            return { dir: "straight", turnAbsoluteMeters: 0 };
+            // 直近25m以内に一番曲がっている場所を発見したら、その判定をロックする
+            if (bestDirection !== "straight" && (bestTurnMeters - currentMeters) <= 25) {
+                lockedDirection = bestDirection;
+                lockedTurnMeters = bestTurnMeters;
+            }
+
+            return { dir: bestDirection, turnAbsoluteMeters: bestTurnMeters };
         }
 
         function updateNavigationDisplay() {
@@ -260,8 +278,8 @@
             if (progressMeters >= currentDistanceMeters - 4) {
                 text = "目的地に到着しました";
                 distanceText = "お疲れ様でした";
+                lockedDirection = "straight";
             } else {
-                // 完全メートルベースで前方をスキャン（タイムラグの発生源を根絶）
                 const scanResult = scanAheadForTurn(progressMeters);
 
                 if (scanResult.dir === "left") text = "次を左折します";
@@ -275,8 +293,12 @@
 
                     if (dynamicDist >= 1000) {
                         distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
-                    } else if (dynamicDist <= 8) { // 8m手前に入ったら「まもなく」表示に固定
+                    } else if (dynamicDist <= 6) { // まもなくの判定を6mに調整
                         distanceText = `まもなくです`;
+                        // 交差点を通過したらロックを解除する準備
+                        if (dynamicDist < -2) {
+                            lockedDirection = "straight";
+                        }
                     } else {
                         distanceText = `あと ${Math.round(dynamicDist)} m 先`;
                     }
@@ -291,7 +313,7 @@
             }
 
             document.getElementById('navi-instruction').innerText = text;
-            document.getElementById('navi-distance').innerText = distanceText;
+            document.getElementById('map' && 'navi-distance').innerText = distanceText;
 
             if (text !== lastInstruction) {
                 speak(text);
@@ -358,6 +380,7 @@
 
         function stopSimulation() {
             clearInterval(simTimer); isSimulating = false; progressMeters = 0;
+            lockedDirection = "straight"; lockedTurnMeters = 0;
             simBtn.innerText = "▶️ デモ走行開始"; simBtn.className = "btn btn-warning";
         }
 
