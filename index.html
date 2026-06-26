@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v2.2.0)</title>
+    <title>道案内システム (v2.3.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v2.2.0) */
+        /* 左上のバージョン表示バッジ (v2.3.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v2.2.0</div>
+        <div id="version-badge">v2.3.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -118,7 +118,7 @@
         let progressMeters = 0;      
         let isSimulating = false;
 
-        // v2.2.0 固定用変数
+        // 固定用変数
         let lockedDirection = "straight";
         let lockedTurnMeters = 0;
         let lastDisplayUpdateTime = 0; 
@@ -182,6 +182,8 @@
 
         function calculateRoute(start, end) {
             if (routeControl) map.removeControl(routeControl);
+            
+            // 地図上に赤い線を出す標準レイアウトを維持しつつ、自動テキスト案内だけ非表示(show:false)にする設定
             routeControl = L.Routing.control({
                 waypoints: [start, end], serviceUrl: 'https://router.project-osrm.org/route/v1',
                 routeWhileDragging: false, addWaypoints: false, show: false
@@ -190,10 +192,11 @@
             routeControl.on('routesfound', function(e) {
                 const route = e.routes[0];
                 
+                simRouteLines = route.coordinates;
+                simInstructions = route.instructions;
+                currentDistanceMeters = route.summary.totalDistance;
+                
                 if (!isSimulating) {
-                    simRouteLines = route.coordinates;
-                    simInstructions = route.instructions;
-                    currentDistanceMeters = route.summary.totalDistance;
                     progressMeters = 0;
                     lockedDirection = "straight";
                     lockedTurnMeters = 0;
@@ -202,27 +205,25 @@
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
                 
-                updateNavigationDisplay(true); 
+                updateNavigationDisplay(true); // 初回描画を強制実行
             });
         }
 
-        // ★v2.2.0 コアロジック：仮想上のメートルではなく、「本物の地図データ上の交差点の角（点の座標）」のm数を特定してロックする
+        // 交差点の点（座標）のm数を特定してロック
         function scanAheadWithTargetLock(currentMeters) {
-            if (simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
+            if (!simRouteLines || simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // 現在地がすでにロック位置を超えた（2m以上進んだ）場合はロック解除
+            // すでにロック位置を超えた（2m以上進んだ）場合はロック解除
             if (lockedDirection !== "straight" && currentMeters > lockedTurnMeters + 2) {
                 lockedDirection = "straight";
                 lockedTurnMeters = 0;
             }
 
-            // ロック中は、それより奥の交差点を検知しないようにスキャン制限
             let maxScanDistance = 120;
             if (lockedDirection !== "straight") {
                 maxScanDistance = Math.min(120, (lockedTurnMeters - currentMeters) + 10);
             }
 
-            // 現在の進行方向ベクトルを取得
             const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 4));
             const pCur = getCoordinateAtDistance(currentMeters);
             const vInX = pCur.lng - pPre.lng;
@@ -230,14 +231,12 @@
             const lenIn = Math.sqrt(vInX * vInX + vInY * vInY);
             
             let foundDirection = "straight";
-            let foundVertexMeters = 0; // スキャン上のm数ではなく、本物の交差点（角の点）のm数
+            let foundVertexMeters = 0; 
             let maxAngleFound = 0;
 
             if (lenIn > 0) {
-                // 現在地がルート全体のどの「インデックス（点）」の間にいるかを正確に把握
                 let currentIdx = getCoordinateIndexAtDistance(currentMeters);
 
-                // 現在の点の位置から、前方120m以内に存在する「本物のルートの角の点」を順に検査していく
                 let accumulatedDist = 0;
                 for (let i = currentIdx; i < simRouteLines.length - 2; i++) {
                     const p1 = simRouteLines[i];
@@ -246,9 +245,8 @@
 
                     const d1 = L.latLng(p1).distanceTo(p2);
                     accumulatedDist += d1;
-                    if (accumulatedDist > maxScanDistance) break; // 制限距離を超えたら奥は見ない
+                    if (accumulatedDist > maxScanDistance) break; 
 
-                    // 本物の角の点(i+1)における侵入・脱出角度を精密計算
                     const v1X = p2.lng - p1.lng;
                     const v1Y = p2.lat - p1.lat;
                     const v2X = p3.lng - p2.lng;
@@ -262,11 +260,8 @@
                     const cosTheta = dot / (len1 * len2);
                     const angleDeg = Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
 
-                    // 明確な折れ曲がり（22度以上）を発見し、それがこの交差点エリアで最大角の場合
                     if (angleDeg >= 22 && angleDeg > maxAngleFound) {
                         maxAngleFound = angleDeg;
-                        
-                        // 【ここが最重要】折れ曲がっている頂点「p2 (i+1)」の、スタート地点からの「正確な累計距離（固定値）」を逆算
                         foundVertexMeters = getDistanceAtCoordinateIndex(i + 1);
 
                         const cross = v1X * v2Y - v1Y * v2X;
@@ -279,13 +274,11 @@
                 }
             }
 
-            // ロック処理（ブレが発生しない本物の頂点m数で固定）
             if (foundDirection !== "straight") {
                 if (lockedDirection === "straight") {
                     lockedDirection = foundDirection;
                     lockedTurnMeters = foundVertexMeters;
                 } else {
-                    // 同一の交差点なら上書きせず固定、完全に別の交差点（15m以上の大ズレ）に移行した場合のみ更新
                     const discrepancy = Math.abs(lockedTurnMeters - foundVertexMeters);
                     if (discrepancy >= 15) {
                         lockedDirection = foundDirection;
@@ -319,12 +312,11 @@
                 else text = "道なりに直進します";
 
                 if (scanResult.dir !== "straight" && scanResult.turnAbsoluteMeters > 0) {
-                    // 本物の交差点の点までの残り距離を純粋計算
                     const dynamicDist = scanResult.turnAbsoluteMeters - progressMeters;
 
                     if (dynamicDist >= 1000) {
                         distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
-                    } else if (dynamicDist <= 3) { // 交差点の3m手前で「まもなくです」に固定
+                    } else if (dynamicDist <= 3) { 
                         distanceText = `まもなくです`;
                         if (dynamicDist < -1) {
                             lockedDirection = "straight";
@@ -342,6 +334,7 @@
                 }
             }
 
+            // タイポを修正：正しいID要素に文字を反映
             if (shouldUpdateUI) {
                 document.getElementById('navi-instruction').innerText = text;
                 document.getElementById('navi-distance').innerText = distanceText;
@@ -359,7 +352,6 @@
             updateStatus(`ナビ走行中... 全体の残り距離: ${(remainingTotal/1000).toFixed(2)} km`);
         }
 
-        // 指定メートルが、ルートのどのインデックスの間にあるかを返す関数
         function getCoordinateIndexAtDistance(meters) {
             let currentDist = 0;
             for (let i = 0; i < simRouteLines.length - 1; i++) {
@@ -372,434 +364,12 @@
             return simRouteLines.length - 1;
         }
 
-        // 特定のインデックス（点）の、スタートからの累計メートル数を返す関数
         function getDistanceAtCoordinateIndex(targetIndex) {
             let dist = 0;
             for (let i = 0; i < targetIndex && i < simRouteLines.length - 1; i++) {
                 dist += L.latLng(simRouteLines[i]).distanceTo(simRouteLines[i+1]);
             }
             return dist;
-        }
-
-        function getCoordinateAtDistance(meters) {
-            let currentDist = 0;
-            for (let i = 0; i < simRouteLines.length - 1; i++) {
-                const p1 = L.latLng(simRouteLines[i]);
-                const p2 = L.latLng(simRouteLines[i+1]);
-                const segmentDist = p1.distanceTo(p2);
-                
-                if (currentDist + segmentDist >= meters) {
-                    const ratio = (meters - currentDist) / segmentDist;
-                    return L.latLng(
-                        p1.lat + (p2.lat - p1.lat) * ratio,
-                        p1.lng + (p2.lng - p1.lng) * ratio
-                    );
-                }
-                currentDist += segmentDist;
-            }
-            return L.latLng(simRouteLines[simRouteLines.length - 1]);
-        }
-
-        // シミュレーション(デモ走行)処理
-        const simBtn = document.getElementById('sim-btn');
-        simBtn.addEventListener('click', () => {
-            if (isSimulating) {
-                clearInterval(simTimer); isSimulating = false;
-                simBtn.innerText = "▶️ デモ走行再開"; simBtn.className = "btn btn-warning";
-            } else {
-                if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-                isSimulating = true;
-                simBtn.innerText = "⏸️ 一時停止"; simBtn.className = "btn btn-danger";
-                isFollowing = true; updateFollowButton();
-
-                simTimer = setInterval(() => {
-                    const speedPerSecond = parseFloat(document.getElementById('speed-mode').value);
-                    const speedPerDecisecond = speedPerSecond / 10; 
-
-                    progressMeters += speedPerDecisecond;
-
-                    if (progressMeters < currentDistanceMeters) {
-                        userLocation = getCoordinateAtDistance(progressMeters);
-                        if (startMarker) startMarker.setLatLng(userLocation).setPopupContent("現在地 (デモ走行中)");
-                        if (isFollowing) map.setView(userLocation, 17);
-                        updateNavigationDisplay(false); 
-                    } else {
-                        progressMeters = currentDistanceMeters;
-                        updateNavigationDisplay(true);
-                        stopSimulation();
-                        document.getElementById('navi-instruction').innerText = "目的地に到着しました";
-                        document.getElementById('navi-distance').innerText = "お疲れ様でした";
-                        updateStatus("デモ走行を終了しました。");
-                    }
-                }, 100); 
-            }
-        });
-
-        function stopSimulation() {
-            clearInterval(simTimer); isSimulating = false; progressMeters = 0;
-            lockedDirection = "straight"; lockedTurnMeters = 0; lastDisplayUpdateTime = 0;
-            simBtn.innerText = "▶️ デモ走行開始"; simBtn.className = "btn btn-warning";
-        }
-
-        function speak(text) {
-            if ('speechSynthesis' in window) {
-                window.speechSynthesis.cancel();
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.lang = 'ja-JP'; window.speechSynthesis.speak(utterance);
-            }
-        }
-        function updateStatus(msg) { document.getElementById('status').innerText = msg; }
-    </script>
-</body>
-</html><!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v2.1.0)</title>
-    
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    
-    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
-    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
-
-    <style>
-        html, body { height: 100%; margin: 0; padding: 0; font-family: sans-serif; overflow: hidden; }
-        
-        #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
-        #map { flex: 1; height: 100%; z-index: 1; }
-        
-        /* 左上のバージョン表示バッジ (v2.1.0) */
-        #version-badge {
-            position: absolute;
-            top: 10px;
-            left: 50px; 
-            background: rgba(0, 0, 0, 0.75);
-            color: #00ffcc;
-            padding: 5px 10px;
-            font-size: 12px;
-            font-weight: bold;
-            font-family: monospace;
-            border-radius: 4px;
-            border: 1px solid #00ffcc;
-            z-index: 1000; 
-            pointer-events: none; 
-            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
-        }
-
-        #navi-panel {
-            background: #222; color: #fff; padding: 20px; box-sizing: border-box;
-            display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;
-        }
-        #navi-instruction { font-size: 26px; font-weight: bold; margin-bottom: 10px; color: #00ffcc; }
-        #navi-distance { font-size: 20px; color: #ccc; }
-
-        @media (orientation: landscape) {
-            #main-container { flex-direction: row; }
-            #navi-panel { width: 320px; height: 100%; border-left: 4px solid #007bff; }
-        }
-        @media (orientation: portrait) {
-            #main-container { flex-direction: column-reverse; }
-            #navi-panel { width: 100%; height: 140px; border-bottom: 4px solid #007bff; }
-            #navi-instruction { font-size: 20px; }
-            #navi-distance { font-size: 16px; }
-        }
-
-        #control-panel { 
-            height: 160px; background: #f8f9fa; padding: 12px; box-sizing: border-box; 
-            display: flex; flex-direction: column; gap: 8px; box-shadow: 0 -2px 5px rgba(0,0,0,0.1);
-            position: relative; z-index: 1000;
-        }
-        .input-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-        .input-row label { width: 60px; font-weight: bold; font-size: 13px; }
-        .input-box { flex: 1; min-width: 150px; padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; }
-        .select-box { padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; }
-        .btn { padding: 6px 12px; font-size: 13px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
-        .btn-secondary { background: #6c757d; }
-        .btn-success { background: #28a745; }
-        .btn-warning { background: #ffc107; color: #212529; }
-        .btn-danger { background: #dc3545; }
-        #status { font-size: 12px; color: #666; font-weight: bold; }
-    </style>
-</head>
-<body>
-
-    <div id="main-container">
-        <div id="version-badge">v2.1.0</div>
-        <div id="map"></div>
-        <div id="navi-panel">
-            <div id="navi-instruction">案内を開始してください</div>
-            <div id="navi-distance">ーー 先</div>
-        </div>
-    </div>
-
-    <div id="control-panel">
-        <div class="input-row">
-            <label>現在地:</label>
-            <button id="gps-btn" class="btn btn-secondary">🛰️ GPS取得</button>
-            <input type="text" id="start-input" class="input-box" placeholder="または場所を入力（例：新宿駅）">
-            <button id="set-start-btn" class="btn">設定</button>
-            <button id="follow-btn" class="btn btn-success">🔄 追従:ON</button>
-        </div>
-
-        <div class="input-row">
-            <label>目的地:</label>
-            <input type="text" id="end-input" class="input-box" placeholder="目的地を入力（例：東京駅）">
-            <button id="set-end-btn" class="btn">ルート検索</button>
-            <button id="sim-btn" class="btn btn-warning" disabled>▶️ デモ走行開始</button>
-            <select id="speed-mode" class="select-box">
-                <option value="1.1">🚶 徒歩モード (リアル時速4km)</option>
-                <option value="11.1">🚗 自動車モード (快速時速40km)</option>
-            </select>
-        </div>
-        <div id="status">現在地と目的地を設定してください。</div>
-    </div>
-
-    <script>
-        const map = L.map('map').setView([35.6812, 139.7671], 14);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
-
-        let startMarker = null, endMarker = null, routeControl = null;
-        let userLocation = null, destinationLatLng = null, watchId = null;
-        let lastInstruction = "", isFollowing = true; 
-
-        let simTimer = null;
-        let simRouteLines = [];      
-        let simInstructions = [];    
-        let currentDistanceMeters = 0; 
-        let progressMeters = 0;      
-        let isSimulating = false;
-
-        // v2.1.0 単一ターゲット固定用の変数
-        let lockedDirection = "straight";
-        let lockedTurnMeters = 0;
-        let lastDisplayUpdateTime = 0; 
-
-        const followBtn = document.getElementById('follow-btn');
-        followBtn.addEventListener('click', () => { isFollowing = !isFollowing; updateFollowButton(); });
-
-        function updateFollowButton() {
-            if (isFollowing) {
-                followBtn.innerText = "🔄 追従:ON"; followBtn.className = "btn btn-success";
-                if (userLocation) map.setView(userLocation, 17); 
-            } else {
-                followBtn.innerText = "🛑 追従:OFF"; followBtn.className = "btn btn-secondary";
-            }
-        }
-        map.on('movestart', (e) => { if (!e.hard && isFollowing) { isFollowing = false; updateFollowButton(); } });
-
-        // GPS取得
-        document.getElementById('gps-btn').addEventListener('click', () => {
-            stopSimulation(); document.getElementById('start-input').value = "";
-            if (!navigator.geolocation) return updateStatus("⚠️ GPS非対応");
-            updateStatus("GPS位置情報を取得中...");
-            if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-            watchId = navigator.geolocation.watchPosition(function(position) {
-                userLocation = L.latLng(position.coords.latitude, position.coords.longitude);
-                updateLocationMarker("現在地 (GPS)");
-                if (destinationLatLng) calculateRoute(userLocation, destinationLatLng);
-            }, function() { updateStatus("⚠️ GPS取得失敗"); }, { enableHighAccuracy: true, timeout: 5000 });
-        });
-
-        // 手動・現在地
-        document.getElementById('set-start-btn').addEventListener('click', () => {
-            stopSimulation(); const query = document.getElementById('start-input').value.trim(); if (!query) return;
-            if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-            searchLocation(query, (latLng) => { userLocation = latLng; updateLocationMarker(`現在地: ${query}`); if (destinationLatLng) calculateRoute(userLocation, destinationLatLng); });
-        });
-
-        // 手動・目的地 
-        document.getElementById('set-end-btn').addEventListener('click', () => {
-            const query = document.getElementById('end-input').value.trim(); if (!query) return;
-            searchLocation(query, (latLng) => {
-                destinationLatLng = latLng;
-                if (!endMarker) endMarker = L.marker(destinationLatLng).addTo(map).bindPopup(`目的地: ${query}`).openPopup();
-                else endMarker.setLatLng(destinationLatLng).setPopupContent(`目的地: ${query}`);
-                speak(`目的地を${query}に設定しました。`);
-                if (userLocation) calculateRoute(userLocation, destinationLatLng);
-            });
-        });
-
-        function updateLocationMarker(popupText) {
-            if (!startMarker) startMarker = L.marker(userLocation).addTo(map).bindPopup(popupText).openPopup();
-            else startMarker.setLatLng(userLocation).setPopupContent(popupText);
-            if (isFollowing) map.setView(userLocation, 17);
-        }
-
-        function searchLocation(query, callback) {
-            fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(query))
-            .then(res => res.json()).then(data => { if (data && data.length > 0) callback(L.latLng(parseFloat(data[0].lat), parseFloat(data[0].lon))); else updateStatus(`⚠️ 「${query}」不検出`); })
-            .catch(() => updateStatus("⚠️ 通信エラー"));
-        }
-
-        function calculateRoute(start, end) {
-            if (routeControl) map.removeControl(routeControl);
-            routeControl = L.Routing.control({
-                waypoints: [start, end], serviceUrl: 'https://router.project-osrm.org/route/v1',
-                routeWhileDragging: false, addWaypoints: false, show: false
-            }).addTo(map);
-
-            routeControl.on('routesfound', function(e) {
-                const route = e.routes[0];
-                
-                if (!isSimulating) {
-                    simRouteLines = route.coordinates;
-                    simInstructions = route.instructions;
-                    currentDistanceMeters = route.summary.totalDistance;
-                    progressMeters = 0;
-                    lockedDirection = "straight";
-                    lockedTurnMeters = 0;
-                    lastDisplayUpdateTime = 0;
-                    document.getElementById('sim-btn').disabled = false;
-                    updateStatus("ルート確定。デモ走行が可能です。");
-                }
-                
-                updateNavigationDisplay(true); 
-            });
-        }
-
-        // ★v2.1.0 コアロジック：一度ロックしたら、その交差点を通過するまで先のスキャンを打ち切る
-        function scanAheadWithTargetLock(currentMeters) {
-            if (simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
-
-            // 現在地がすでにロック位置を通り過ぎた（3m超えた）場合はロックを解除して次に進む
-            if (lockedDirection !== "straight" && currentMeters > lockedTurnMeters + 3) {
-                lockedDirection = "straight";
-                lockedTurnMeters = 0;
-            }
-
-            // 【重要】すでにロック中のターゲットがある場合、それより遠くはスキャンしない（最大スキャン距離をロック位置までに制限する）
-            let maxScanDistance = 120;
-            if (lockedDirection !== "straight") {
-                // すでにロックしている交差点までの残り距離を算出し、スキャン枠の上限にする
-                const remainingToLock = lockedTurnMeters - currentMeters;
-                // ロック位置の周辺（前後10m）だけを生存確認用としてスキャンし、それより先は見ない
-                maxScanDistance = Math.min(120, remainingToLock + 10);
-            }
-
-            const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 5));
-            const pCur = getCoordinateAtDistance(currentMeters);
-            const vInX = pCur.lng - pPre.lng;
-            const vInY = pCur.lat - pPre.lat;
-            const lenIn = Math.sqrt(vInX * vInX + vInY * vInY);
-            
-            let foundDirection = "straight";
-            let foundTurnMeters = 0;
-            let maxAngleFound = 0;
-
-            if (lenIn > 0) {
-                const step = 2;
-
-                for (let d = 4; d <= maxScanDistance; d += step) {
-                    const futureMeters = currentMeters + d;
-                    if (futureMeters >= currentDistanceMeters) break;
-
-                    const p1 = getCoordinateAtDistance(futureMeters);
-                    const p2 = getCoordinateAtDistance(Math.min(currentDistanceMeters, futureMeters + 8));
-
-                    const vOutX = p2.lng - p1.lng;
-                    const vOutY = p2.lat - p1.lat;
-                    const lenOut = Math.sqrt(vOutX * vOutX + vOutY * vOutY);
-                    if (lenOut === 0) continue;
-
-                    const dotProduct = vInX * vOutX + vInY * vOutY;
-                    const cosTheta = dotProduct / (lenIn * lenOut);
-                    const angleDeg = Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
-
-                    if (angleDeg >= 22 && angleDeg > maxAngleFound) {
-                        maxAngleFound = angleDeg;
-                        foundTurnMeters = futureMeters;
-
-                        const crossProduct = vInX * vOutY - vInY * vOutX;
-                        if (crossProduct > 0) {
-                            foundDirection = angleDeg > 55 ? "left" : "slight-left";
-                        } else {
-                            foundDirection = angleDeg > 55 ? "right" : "slight-right";
-                        }
-                    }
-                }
-            }
-
-            // ロックの反映・微調整
-            if (foundDirection !== "straight") {
-                if (lockedDirection === "straight") {
-                    // 未ロック状態なら即ロック
-                    lockedDirection = foundDirection;
-                    lockedTurnMeters = foundTurnMeters;
-                } else {
-                    // すでにロック中の場合、同じ交差点内のわずかな補正（15m未満）か、
-                    // もしくはロック上限をすり抜けるほどルートが急変した（15m以上の大ズレ）場合のみ上書き
-                    const discrepancy = Math.abs(lockedTurnMeters - foundTurnMeters);
-                    if (discrepancy >= 15) {
-                        lockedDirection = foundDirection;
-                        lockedTurnMeters = foundTurnMeters;
-                    }
-                }
-            }
-
-            return { dir: lockedDirection, turnAbsoluteMeters: lockedTurnMeters };
-        }
-
-        function updateNavigationDisplay(forceUpdate = false) {
-            if (!simRouteLines || simRouteLines.length === 0) return;
-
-            const now = Date.now();
-            const shouldUpdateUI = forceUpdate || (now - lastDisplayUpdateTime >= 1000);
-
-            let text = "道なりに直進します";
-            let distanceText = "ーー 先";
-
-            if (progressMeters >= currentDistanceMeters - 4) {
-                text = "目的地に到着しました";
-                distanceText = "お疲れ様でした";
-            } else {
-                const scanResult = scanAheadWithTargetLock(progressMeters);
-
-                if (scanResult.dir === "left") text = "次を左折します";
-                else if (scanResult.dir === "right") text = "次を右折します";
-                else if (scanResult.dir === "slight-left") text = "やや左方向です";
-                else if (scanResult.dir === "slight-right") text = "やや右方向です";
-                else text = "道なりに直進します";
-
-                if (scanResult.dir !== "straight" && scanResult.turnAbsoluteMeters > 0) {
-                    const dynamicDist = scanResult.turnAbsoluteMeters - progressMeters;
-
-                    if (dynamicDist >= 1000) {
-                        distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
-                    } else if (dynamicDist <= 4) { // 4m以下でまもなく
-                        distanceText = `まもなくです`;
-                        if (dynamicDist < -1) {
-                            lockedDirection = "straight";
-                        }
-                    } else {
-                        distanceText = `あと ${Math.round(dynamicDist)} m 先`;
-                    }
-                } else {
-                    const remainingTotal = Math.max(0, currentDistanceMeters - progressMeters);
-                    if (remainingTotal >= 1000) {
-                        distanceText = `目的地まで ${(remainingTotal / 1000).toFixed(1)} km`;
-                    } else {
-                        distanceText = `目的地まで ${Math.round(remainingTotal)} m`;
-                    }
-                }
-            }
-
-            if (shouldUpdateUI) {
-                document.getElementById('navi-instruction').innerText = text;
-                document.getElementById('navi-distance').innerText = distanceText;
-                lastDisplayUpdateTime = now;
-            }
-
-            if (text !== lastInstruction) {
-                speak(text);
-                lastInstruction = text;
-                document.getElementById('navi-instruction').innerText = text;
-                document.getElementById('navi-distance').innerText = distanceText;
-            }
-
-            const remainingTotal = Math.max(0, currentDistanceMeters - progressMeters);
-            updateStatus(`ナビ走行中... 全体の残り距離: ${(remainingTotal/1000).toFixed(2)} km`);
         }
 
         function getCoordinateAtDistance(meters) {
