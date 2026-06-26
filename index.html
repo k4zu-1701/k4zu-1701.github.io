@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v2.8.0)</title>
+    <title>道案内システム (v2.5.5)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v2.8.0) */
+        /* 左上のバージョン表示バッジ (v2.5.5) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -67,13 +67,13 @@
         .btn-success { background: #28a745; }
         .btn-warning { background: #ffc107; color: #212529; }
         .btn-danger { background: #dc3545; }
-        #status { font-size: 11px; color: #444; font-weight: normal; font-family: monospace; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+        #status { font-size: 12px; color: #666; font-weight: bold; }
     </style>
 </head>
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v2.8.0</div>
+        <div id="version-badge">v2.5.5</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -118,14 +118,10 @@
         let progressMeters = 0;      
         let isSimulating = false;
 
-        // 固定用変数
+        // 【大好評だった固定用変数を完全リバート】
         let lockedDirection = "straight";
         let lockedTurnMeters = 0;
         let lastDisplayUpdateTime = 0; 
-
-        // デバッグ用
-        let debugMaxAngle = 0;
-        let debugMaxAngleDist = 0;
 
         const followBtn = document.getElementById('follow-btn');
         followBtn.addEventListener('click', () => { isFollowing = !isFollowing; updateFollowButton(); });
@@ -194,6 +190,7 @@
 
             routeControl.on('routesfound', function(e) {
                 const route = e.routes[0];
+                
                 simRouteLines = route.coordinates;
                 simInstructions = route.instructions;
                 currentDistanceMeters = route.summary.totalDistance;
@@ -206,23 +203,25 @@
                     document.getElementById('sim-btn').disabled = false;
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
+                
                 updateNavigationDisplay(true); 
             });
         }
 
-        // ★v2.8.0 コア修正：インデックスを現在地より15m手前からスキャンし、すり抜けを完全防止
+        // ★v2.5.5：大好評だった初期の「シンプル3点角度スキャン」に完全復元
         function scanAheadWithTargetLock(currentMeters) {
             if (!simRouteLines || simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // 交差点頂点を「2m以上超えたら」確実にロック解除（ご指定条件）
+            // 【ご指定条件の完全維持】交差点の頂点を2m以上超えたらロック解除
             if (lockedDirection !== "straight" && currentMeters >= lockedTurnMeters + 2) {
                 lockedDirection = "straight";
                 lockedTurnMeters = 0;
             }
 
-            let maxScanDistance = 250;
+            // シンプルに120m先までを探索範囲とする
+            let maxScanDistance = 120;
             if (lockedDirection !== "straight") {
-                maxScanDistance = Math.min(250, Math.max(10, (lockedTurnMeters - currentMeters) + 10));
+                maxScanDistance = Math.min(120, Math.max(10, (lockedTurnMeters - currentMeters) + 10));
             }
 
             const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 4));
@@ -233,30 +232,19 @@
             
             let foundDirection = "straight";
             let foundVertexMeters = 0; 
-            let maxAngleFound = 0;
-
-            debugMaxAngle = 0;
-            debugMaxAngleDist = 0;
 
             if (lenIn > 0) {
-                // 【超重要】誤差すり抜け対策：現在地より15m手前のインデックスから探索を開始する
-                let scanStartMeters = Math.max(0, currentMeters - 15);
-                let startIdx = getCoordinateIndexAtDistance(scanStartMeters);
+                let currentIdx = getCoordinateIndexAtDistance(currentMeters);
 
-                for (let i = startIdx; i < simRouteLines.length - 2; i++) {
-                    const thisVertexMeters = getDistanceAtCoordinateIndex(i + 1);
-                    
-                    // 現在地より2m以上後ろにある、完全に「曲がり終えた過去の角」は無視する
-                    if (thisVertexMeters <= currentMeters - 2) continue;
-
-                    // 現在地から前方にどれだけ離れているか
-                    const relativeDist = thisVertexMeters - currentMeters;
-                    // 250m以上先の角は、今回はスキャン対象外
-                    if (relativeDist > maxScanDistance) break; 
-
+                // シンプルに目の前のインデックスから順に3点探索する初期ロジック
+                for (let i = currentIdx; i < simRouteLines.length - 2; i++) {
                     const p1 = simRouteLines[i];
                     const p2 = simRouteLines[i + 1];
                     const p3 = simRouteLines[i + 2];
+
+                    const thisVertexMeters = getDistanceAtCoordinateIndex(i + 1);
+                    if (thisVertexMeters <= currentMeters - 2) continue;
+                    if (thisVertexMeters - currentMeters > maxScanDistance) break; 
 
                     const v1X = p2.lng - p1.lng;
                     const v1Y = p2.lat - p1.lat;
@@ -271,22 +259,16 @@
                     const cosTheta = dot / (len1 * len2);
                     const angleDeg = Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
 
-                    if (relativeDist >= 0 && angleDeg > debugMaxAngle) {
-                        debugMaxAngle = angleDeg;
-                        debugMaxAngleDist = relativeDist;
-                    }
-
-                    // しきい値15度。範囲内で最もはっきりと曲がっているポイントを優先検知
-                    if (angleDeg >= 15 && angleDeg > maxAngleFound) {
-                        maxAngleFound = angleDeg;
+                    // 安全弁：しきい値を「15度」に少しだけ緩め、見落としを防止
+                    if (angleDeg >= 15) {
                         foundVertexMeters = thisVertexMeters;
-
                         const cross = v1X * v2Y - v1Y * v2X;
                         if (cross > 0) {
                             foundDirection = angleDeg > 45 ? "left" : "slight-left";
                         } else {
                             foundDirection = angleDeg > 45 ? "right" : "slight-right";
                         }
+                        break; // 最初に見つかった最も近い角をロックする（初期仕様）
                     }
                 }
             }
@@ -316,12 +298,12 @@
             let text = "道なりに直進します";
             let distanceText = "ーー 先";
 
-            const scanResult = scanAheadWithTargetLock(progressMeters);
-
             if (progressMeters >= currentDistanceMeters - 3) {
                 text = "目的地に到着しました";
                 distanceText = "お疲れ様でした";
             } else {
+                const scanResult = scanAheadWithTargetLock(progressMeters);
+
                 if (scanResult.dir === "left") text = "次を左折します";
                 else if (scanResult.dir === "right") text = "次を右折します";
                 else if (scanResult.dir === "slight-left") text = "やや左方向です";
@@ -334,7 +316,7 @@
                     if (dynamicDist >= 1000) {
                         distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
                     } else if (dynamicDist <= 5) { 
-                        // 5m以内「まもなくです」（ご指定条件維持）
+                        // 【ご指定条件】5m以内に入ったら「まもなくです」
                         distanceText = `まもなくです`;
                     } else {
                         distanceText = `あと ${Math.round(dynamicDist)} m 先`;
@@ -362,8 +344,8 @@
                 document.getElementById('navi-distance').innerText = distanceText;
             }
 
-            const rem = Math.max(0, currentDistanceMeters - progressMeters);
-            updateStatus(`残:${Math.round(rem)}m | 前方最大角度:${debugMaxAngle.toFixed(1)}度(${Math.round(debugMaxAngleDist)}m先) | ロック:${lockedDirection}(角:${Math.round(lockedTurnMeters)}m地点)`);
+            const remainingTotal = Math.max(0, currentDistanceMeters - progressMeters);
+            updateStatus(`ナビ走行中... 全体の残り距離: ${(remainingTotal/1000).toFixed(2)} km`);
         }
 
         function getCoordinateIndexAtDistance(meters) {
