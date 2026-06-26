@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v2.5.0)</title>
+    <title>道案内システム (v2.6.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v2.5.0) */
+        /* 左上のバージョン表示バッジ (v2.6.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v2.5.0</div>
+        <div id="version-badge">v2.6.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -208,10 +208,11 @@
             });
         }
 
+        // ★v2.6.0 コア修正：途中に「直線の点」があっても途切れずに前方をフルスキャンする
         function scanAheadWithTargetLock(currentMeters) {
             if (!simRouteLines || simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // ★v2.5.0 修正その2：交差点の頂点を「2m以上超えたら」ロックを解除
+            // 交差点の頂点を【2m以上超えたら】確実にロック解除
             if (lockedDirection !== "straight" && currentMeters >= lockedTurnMeters + 2) {
                 lockedDirection = "straight";
                 lockedTurnMeters = 0;
@@ -236,6 +237,7 @@
                 let currentIdx = getCoordinateIndexAtDistance(currentMeters);
 
                 let accumulatedDist = 0;
+                // break条件を変更：途中に平坦な直線ポイントがあってもループを回し続け、規定距離を網羅する
                 for (let i = currentIdx; i < simRouteLines.length - 2; i++) {
                     const p1 = simRouteLines[i];
                     const p2 = simRouteLines[i + 1];
@@ -243,10 +245,14 @@
 
                     const d1 = L.latLng(p1).distanceTo(p2);
                     accumulatedDist += d1;
-                    if (accumulatedDist > maxScanDistance) break; 
+                    
+                    // 120m制限を超えた時点で終了。それまでは直線ノードがあっても飛ばさない
+                    if (accumulatedDist > maxScanDistance) {
+                        break; 
+                    }
 
                     const thisVertexMeters = getDistanceAtCoordinateIndex(i + 1);
-                    // すでに2m以上通り過ぎた過去の頂点は無視
+                    // すでに通過した（2mより手前の）頂点はスルー
                     if (thisVertexMeters <= currentMeters - 2) continue;
 
                     const v1X = p2.lng - p1.lng;
@@ -262,6 +268,7 @@
                     const cosTheta = dot / (len1 * len2);
                     const angleDeg = Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
 
+                    // 22度以上の変化があり、その走査範囲の中で最も角度が大きいものを「一番近い交差点」として認識
                     if (angleDeg >= 22 && angleDeg > maxAngleFound) {
                         maxAngleFound = angleDeg;
                         foundVertexMeters = thisVertexMeters;
@@ -319,7 +326,7 @@
                     if (dynamicDist >= 1000) {
                         distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
                     } else if (dynamicDist <= 5) { 
-                        // ★v2.5.0 修正その1：「5m以内」に入ったら「まもなくです」を表示
+                        // ★ご指定要件：5m以内に入ったら「まもなくです」
                         distanceText = `まもなくです`;
                     } else {
                         distanceText = `あと ${Math.round(dynamicDist)} m 先`;
