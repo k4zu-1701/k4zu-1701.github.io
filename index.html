@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>道案内システム (v2.3.0)</title>
+    <title>道案内システム (v2.5.0)</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -17,7 +17,7 @@
         #main-container { display: flex; width: 100%; height: calc(100% - 160px); position: relative; }
         #map { flex: 1; height: 100%; z-index: 1; }
         
-        /* 左上のバージョン表示バッジ (v2.3.0) */
+        /* 左上のバージョン表示バッジ (v2.5.0) */
         #version-badge {
             position: absolute;
             top: 10px;
@@ -73,7 +73,7 @@
 <body>
 
     <div id="main-container">
-        <div id="version-badge">v2.3.0</div>
+        <div id="version-badge">v2.5.0</div>
         <div id="map"></div>
         <div id="navi-panel">
             <div id="navi-instruction">案内を開始してください</div>
@@ -183,7 +183,6 @@
         function calculateRoute(start, end) {
             if (routeControl) map.removeControl(routeControl);
             
-            // 地図上に赤い線を出す標準レイアウトを維持しつつ、自動テキスト案内だけ非表示(show:false)にする設定
             routeControl = L.Routing.control({
                 waypoints: [start, end], serviceUrl: 'https://router.project-osrm.org/route/v1',
                 routeWhileDragging: false, addWaypoints: false, show: false
@@ -205,23 +204,22 @@
                     updateStatus("ルート確定。デモ走行が可能です。");
                 }
                 
-                updateNavigationDisplay(true); // 初回描画を強制実行
+                updateNavigationDisplay(true); 
             });
         }
 
-        // 交差点の点（座標）のm数を特定してロック
         function scanAheadWithTargetLock(currentMeters) {
             if (!simRouteLines || simRouteLines.length < 3) return { dir: "straight", turnAbsoluteMeters: 0 };
 
-            // すでにロック位置を超えた（2m以上進んだ）場合はロック解除
-            if (lockedDirection !== "straight" && currentMeters > lockedTurnMeters + 2) {
+            // ★v2.5.0 修正その2：交差点の頂点を「2m以上超えたら」ロックを解除
+            if (lockedDirection !== "straight" && currentMeters >= lockedTurnMeters + 2) {
                 lockedDirection = "straight";
                 lockedTurnMeters = 0;
             }
 
             let maxScanDistance = 120;
             if (lockedDirection !== "straight") {
-                maxScanDistance = Math.min(120, (lockedTurnMeters - currentMeters) + 10);
+                maxScanDistance = Math.min(120, Math.max(10, (lockedTurnMeters - currentMeters) + 10));
             }
 
             const pPre = getCoordinateAtDistance(Math.max(0, currentMeters - 4));
@@ -247,6 +245,10 @@
                     accumulatedDist += d1;
                     if (accumulatedDist > maxScanDistance) break; 
 
+                    const thisVertexMeters = getDistanceAtCoordinateIndex(i + 1);
+                    // すでに2m以上通り過ぎた過去の頂点は無視
+                    if (thisVertexMeters <= currentMeters - 2) continue;
+
                     const v1X = p2.lng - p1.lng;
                     const v1Y = p2.lat - p1.lat;
                     const v2X = p3.lng - p2.lng;
@@ -262,7 +264,7 @@
 
                     if (angleDeg >= 22 && angleDeg > maxAngleFound) {
                         maxAngleFound = angleDeg;
-                        foundVertexMeters = getDistanceAtCoordinateIndex(i + 1);
+                        foundVertexMeters = thisVertexMeters;
 
                         const cross = v1X * v2Y - v1Y * v2X;
                         if (cross > 0) {
@@ -316,11 +318,9 @@
 
                     if (dynamicDist >= 1000) {
                         distanceText = `約 ${(dynamicDist / 1000).toFixed(1)} km 先`;
-                    } else if (dynamicDist <= 3) { 
+                    } else if (dynamicDist <= 5) { 
+                        // ★v2.5.0 修正その1：「5m以内」に入ったら「まもなくです」を表示
                         distanceText = `まもなくです`;
-                        if (dynamicDist < -1) {
-                            lockedDirection = "straight";
-                        }
                     } else {
                         distanceText = `あと ${Math.round(dynamicDist)} m 先`;
                     }
@@ -334,7 +334,6 @@
                 }
             }
 
-            // タイポを修正：正しいID要素に文字を反映
             if (shouldUpdateUI) {
                 document.getElementById('navi-instruction').innerText = text;
                 document.getElementById('navi-distance').innerText = distanceText;
